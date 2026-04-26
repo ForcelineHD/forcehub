@@ -1,3 +1,5 @@
+import os
+
 from fastapi import FastAPI
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
@@ -45,3 +47,14 @@ def status():
         app=APP_NAME,
         version=APP_VERSION,
     )
+
+
+@app.get("/projects")
+def list_projects():
+    base = "/home/flozi/projects"
+    return {
+        "projects": [
+            name for name in os.listdir(base)
+            if os.path.isdir(os.path.join(base, name))
+        ]
+    }
