@@ -1,3 +1,4 @@
+import logging
 from pathlib import Path
 from typing import Literal
 
@@ -25,6 +26,9 @@ app = FastAPI(
 )
 
 CHAT_HISTORY: list[dict[str, str]] = []
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger("forcehub")
 
 
 class StatusResponse(BaseModel):
@@ -469,6 +473,7 @@ def api_chat(req: ChatRequest):
 
         CHAT_HISTORY.append({"role": "user", "content": req.prompt})
         CHAT_HISTORY.append({"role": "assistant", "content": answer})
+        del CHAT_HISTORY[:-20]
 
         return {"text": answer, "model": used_model}
 
