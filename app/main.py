@@ -1,5 +1,6 @@
 import json
 import subprocess
+import time
 from datetime import datetime
 from pathlib import Path
 from typing import Literal
@@ -10,19 +11,20 @@ from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 
 APP_NAME = "forcehub"
-APP_VERSION = "0.6.0"
+APP_VERSION = "0.7.0"
 
 PROJECTS_DIR = Path("/home/flozi/projects")
 DEFAULT_PROJECT = "forcehub"
 DATA_DIR = Path("/home/flozi/projects/forcehub/data")
 CHAT_FILE = DATA_DIR / "chats.json"
+PROJECT_CACHE_FILE = DATA_DIR / "project_cache.json"
 
 OLLAMA_GENERATE_URL = "http://127.0.0.1:11434/api/generate"
 OLLAMA_TAGS_URL = "http://127.0.0.1:11434/api/tags"
 
-MAX_FILE_CHARS = 6000
+MAX_FILE_CHARS = 8000
 MAX_PROJECT_FILES = 15
-MAX_SEARCH_RESULTS = 50
+MAX_SEARCH_RESULTS = 80
 
 app = FastAPI(
     title="ForceHub",
@@ -31,6 +33,7 @@ app = FastAPI(
 )
 
 CHAT_HISTORY: list[dict[str, str]] = []
+LAST_DEBUG: dict[str, str | int | float] = {}
 
 
 class StatusResponse(BaseModel):
@@ -41,7 +44,7 @@ class StatusResponse(BaseModel):
 
 class ChatRequest(BaseModel):
     prompt: str
-    model: str = "qwen2.5-coder:7b"
+    model: str = "auto"
     mode: Literal["normal", "code", "short", "explain"] = "normal"
     project: str = DEFAULT_PROJECT
     project_mode: bool = False
@@ -50,13 +53,13 @@ class ChatRequest(BaseModel):
 class FileReviewRequest(BaseModel):
     project: str = DEFAULT_PROJECT
     file: str
-    model: str = "qwen2.5-coder:7b"
+    model: str = "auto"
     action: Literal["review", "bugs", "explain", "patch"] = "review"
 
 
 class ProjectActionRequest(BaseModel):
     action: Literal["analyze", "bugs", "readme", "commit"]
-    model: str = "qwen2.5-coder:7b"
+    model: str = "auto"
     project: str = DEFAULT_PROJECT
 
 
@@ -68,6 +71,18 @@ class SearchRequest(BaseModel):
 class SaveReadmeRequest(BaseModel):
     project: str = DEFAULT_PROJECT
     content: str
+
+
+class SaveFileRequest(BaseModel):
+    project: str = DEFAULT_PROJECT
+    file: str
+    content: str
+    backup: bool = True
+
+
+class RunCommandRequest(BaseModel):
+    project: str = DEFAULT_PROJECT
+    command: Literal["git_status", "pytest", "ruff", "python_compile"]
 
 
 def safe_project_path(project: str) -> Path:
@@ -145,17 +160,28 @@ def build_project_context(project: str) -> str:
     root = safe_project_path(project)
     chunks = [f"PROJECT: {project}\nROOT: {root}\n"]
 
-    files = [
-        p for p in root.rglob("*")
-        if p.is_file() and should_include_file(p)
-    ]
-
+    files = [p for p in root.rglob("*") if p.is_file() and should_include_file(p)]
     files = sorted(files, key=lambda p: str(p.relative_to(root)))[:MAX_PROJECT_FILES]
 
     for file in files:
         chunks.append(read_file_safe(file, root))
 
     return "\n".join(chunks)
+
+
+def load_cache() -> dict:
+    DATA_DIR.mkdir(exist_ok=True)
+    if not PROJECT_CACHE_FILE.exists():
+        return {}
+    try:
+        return json.loads(PROJECT_CACHE_FILE.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+
+def save_cache(data: dict) -> None:
+    DATA_DIR.mkdir(exist_ok=True)
+    PROJECT_CACHE_FILE.write_text(json.dumps(data, indent=2), encoding="utf-8")
 
 
 def build_prompt(user_prompt: str, mode: str, project: str, project_mode: bool) -> str:
@@ -172,7 +198,13 @@ def build_prompt(user_prompt: str, mode: str, project: str, project_mode: bool) 
 
     project_context = build_project_context(project) if project_mode else ""
 
+    cache = load_cache()
+    cached_summary = cache.get(project, {}).get("summary", "")
+
     return f"""{system}
+
+Cached project summary:
+{cached_summary}
 
 Conversation:
 {history}
@@ -186,11 +218,24 @@ User request:
 Assistant:"""
 
 
-def ask_ollama(prompt: str, model: str) -> str:
+def choose_model(model: str, prompt: str) -> str:
+    if model != "auto":
+        return model
+
+    if len(prompt) < 1200:
+        return "qwen2.5-coder:1.5b"
+
+    return "qwen2.5-coder:7b"
+
+
+def ask_ollama(prompt: str, model: str) -> tuple[str, str, float]:
+    selected_model = choose_model(model, prompt)
+    start = time.time()
+
     r = requests.post(
         OLLAMA_GENERATE_URL,
         json={
-            "model": model,
+            "model": selected_model,
             "prompt": prompt,
             "stream": False,
             "options": {
@@ -202,17 +247,20 @@ def ask_ollama(prompt: str, model: str) -> str:
         timeout=180,
     )
 
+    elapsed = round(time.time() - start, 2)
+
     if r.status_code != 200:
         raise RuntimeError(f"Ollama error {r.status_code}: {r.text}")
 
-    return r.json().get("response", "").strip()
+    answer = r.json().get("response", "").strip()
+    return answer, selected_model, elapsed
 
 
-def ask_with_fallback(prompt: str, model: str) -> tuple[str, str]:
+def ask_with_fallback(prompt: str, model: str) -> tuple[str, str, float]:
     try:
-        return ask_ollama(prompt, model), model
+        return ask_ollama(prompt, model)
     except Exception:
-        return ask_ollama(prompt, "qwen2.5-coder:1.5b"), "qwen2.5-coder:1.5b"
+        return ask_ollama(prompt, "qwen2.5-coder:1.5b")
 
 
 def save_chat(role: str, content: str) -> None:
@@ -226,7 +274,7 @@ def save_chat(role: str, content: str) -> None:
     data = []
     if CHAT_FILE.exists():
         try:
-            data = json.loads(CHAT_FILE.read_text())
+            data = json.loads(CHAT_FILE.read_text(encoding="utf-8"))
         except Exception:
             data = []
 
@@ -235,21 +283,25 @@ def save_chat(role: str, content: str) -> None:
     CHAT_FILE.write_text(json.dumps(data, indent=2), encoding="utf-8")
 
 
-def run_git(project: str, args: list[str]) -> str:
+def run_cmd(project: str, cmd: list[str], timeout: int = 30) -> str:
     root = safe_project_path(project)
     try:
         out = subprocess.check_output(
-            ["git", *args],
+            cmd,
             cwd=root,
             stderr=subprocess.STDOUT,
             text=True,
-            timeout=20,
+            timeout=timeout,
         )
         return out.strip()
     except subprocess.CalledProcessError as e:
         return e.output.strip()
     except Exception as e:
         return str(e)
+
+
+def run_git(project: str, args: list[str]) -> str:
+    return run_cmd(project, ["git", *args], timeout=20)
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -264,7 +316,7 @@ def home():
 :root{--bg:#0f1117;--panel:#151924;--panel2:#111521;--border:#252b3a;--text:#e6e6e6;--muted:#8d96aa;--blue:#4f7cff;--user:#1f3a5f;--ai:#1d2230}
 *{box-sizing:border-box}
 body{margin:0;font-family:Arial,Helvetica,sans-serif;background:var(--bg);color:var(--text)}
-.layout{display:grid;grid-template-columns:330px 1fr;height:100vh}
+.layout{display:grid;grid-template-columns:360px 1fr;height:100vh}
 .sidebar{background:var(--panel);border-right:1px solid var(--border);padding:18px;overflow:auto}
 .sidebar h2{margin:0 0 8px;color:#8ab4ff}.small{color:var(--muted);font-size:13px}
 .sidebar a{color:#b7c7ff;display:block;margin:10px 0;text-decoration:none}
@@ -272,20 +324,21 @@ body{margin:0;font-family:Arial,Helvetica,sans-serif;background:var(--bg);color:
 select,input{width:100%;background:#0f1117;color:var(--text);border:1px solid #30384d;border-radius:8px;padding:8px}
 .main{display:flex;flex-direction:column;height:100vh}.header{padding:14px 22px;border-bottom:1px solid var(--border);background:var(--panel2);display:flex;justify-content:space-between;align-items:center}
 .header h2{margin:0}.chat{flex:1;overflow-y:auto;padding:22px}
-.msg{max-width:1050px;padding:14px 16px;margin-bottom:14px;border-radius:12px;white-space:pre-wrap;line-height:1.48;font-size:14px}
+.msg{max-width:1100px;padding:14px 16px;margin-bottom:14px;border-radius:12px;white-space:pre-wrap;line-height:1.48;font-size:14px}
 .user{background:var(--user);margin-left:auto}.ai{background:var(--ai);border:1px solid #2b3245}.error{background:#3a1d24;border:1px solid #6d2b39}
 .inputbar{display:flex;gap:10px;padding:16px;border-top:1px solid var(--border);background:var(--panel2)}
 textarea{flex:1;resize:none;height:60px;border-radius:10px;border:1px solid #30384d;background:#0f1117;color:#eee;padding:12px;font-size:15px}
 button{border:0;border-radius:10px;background:var(--blue);color:white;font-weight:bold;cursor:pointer;padding:10px 14px}
 button:disabled{background:#3a3f50;cursor:wait}.secondary{background:#2a3040;width:100%;margin-top:8px}.action{background:#26385f;width:100%;margin-top:8px;text-align:left}
 .badge{font-size:12px;color:#b7c7ff}.grid2{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+.editor{width:100%;height:280px;background:#0b0d12;color:#e6e6e6;border:1px solid #30384d;border-radius:8px;padding:10px;font-family:Consolas,monospace;font-size:13px}
 </style>
 </head>
 <body>
 <div class="layout">
 <aside class="sidebar">
 <h2>ForceHub</h2>
-<div class="small">Project-aware AI dashboard</div>
+<div class="small">Local AI dev dashboard</div>
 <hr style="border-color:#252b3a">
 
 <a href="/status">Status API</a>
@@ -301,13 +354,15 @@ button:disabled{background:#3a3f50;cursor:wait}.secondary{background:#2a3040;wid
 <div class="control"><label><input id="projectMode" type="checkbox"> Use project context</label></div>
 
 <div class="control">
-<label>File-aware review</label>
+<label>File</label>
 <select id="file"></select>
 <div class="grid2">
-<button class="action" onclick="fileAction('review')">Review file</button>
-<button class="action" onclick="fileAction('bugs')">Find bugs</button>
-<button class="action" onclick="fileAction('explain')">Explain file</button>
-<button class="action" onclick="fileAction('patch')">Suggest patch</button>
+<button class="action" onclick="viewFile()">View file</button>
+<button class="action" onclick="saveFile()">Save file</button>
+<button class="action" onclick="fileAction('review')">Review</button>
+<button class="action" onclick="fileAction('bugs')">Bugs</button>
+<button class="action" onclick="fileAction('explain')">Explain</button>
+<button class="action" onclick="fileAction('patch')">Patch idea</button>
 </div>
 </div>
 
@@ -317,6 +372,7 @@ button:disabled{background:#3a3f50;cursor:wait}.secondary{background:#2a3040;wid
 <button class="action" onclick="runAction('bugs')">Find project bugs</button>
 <button class="action" onclick="runAction('readme')">Generate README text</button>
 <button class="action" onclick="runAction('commit')">AI commit message</button>
+<button class="action" onclick="cacheProject()">Cache project summary</button>
 </div>
 
 <div class="control">
@@ -327,23 +383,35 @@ button:disabled{background:#3a3f50;cursor:wait}.secondary{background:#2a3040;wid
 </div>
 
 <div class="control">
+<label>Run checks</label>
+<div class="grid2">
+<button class="action" onclick="runCommand('git_status')">git status</button>
+<button class="action" onclick="runCommand('python_compile')">compile</button>
+<button class="action" onclick="runCommand('pytest')">pytest</button>
+<button class="action" onclick="runCommand('ruff')">ruff</button>
+</div>
+</div>
+
+<div class="control">
 <label>Search project</label>
 <input id="search" placeholder="Search text...">
 <button class="action" onclick="searchProject()">Search</button>
 </div>
 
+<button class="secondary" onclick="showDebug()">Show debug</button>
 <button class="secondary" onclick="clearChat()">Clear Memory</button>
-<div class="control small">Backend: Ollama<br>Version: 0.6.0</div>
+<div class="control small">Backend: Ollama<br>Version: 0.7.0</div>
 </aside>
 
 <main class="main">
 <div class="header">
-<div><h2>ForceHub Chat Pro</h2><div class="small">File-aware + Git diff + README + search</div></div>
+<div><h2>ForceHub Chat Pro</h2><div class="small">File editor + safe backup + commands + cache</div></div>
 <div id="state" class="badge">Ready</div>
 </div>
 
 <div id="chat" class="chat">
-<div class="msg ai">Ready. Pick a file, use Git helper, or enable project context.</div>
+<div class="msg ai">Ready. Pick a file, use commands, or ask with project context.</div>
+<textarea id="editor" class="editor" placeholder="File content appears here after View file..."></textarea>
 </div>
 
 <div class="inputbar">
@@ -354,12 +422,12 @@ button:disabled{background:#3a3f50;cursor:wait}.secondary{background:#2a3040;wid
 </div>
 
 <script>
-const chat=document.getElementById("chat"),promptBox=document.getElementById("prompt"),sendBtn=document.getElementById("send"),state=document.getElementById("state"),modelSelect=document.getElementById("model"),modeSelect=document.getElementById("mode"),projectSelect=document.getElementById("project"),projectMode=document.getElementById("projectMode"),fileSelect=document.getElementById("file"),searchBox=document.getElementById("search");
+const chat=document.getElementById("chat"),promptBox=document.getElementById("prompt"),sendBtn=document.getElementById("send"),state=document.getElementById("state"),modelSelect=document.getElementById("model"),modeSelect=document.getElementById("mode"),projectSelect=document.getElementById("project"),projectMode=document.getElementById("projectMode"),fileSelect=document.getElementById("file"),searchBox=document.getElementById("search"),editor=document.getElementById("editor");
 
 function addMessage(text,cls){const div=document.createElement("div");div.className="msg "+cls;div.textContent=text;chat.appendChild(div);chat.scrollTop=chat.scrollHeight}
 function busy(x){sendBtn.disabled=x;sendBtn.textContent=x?"Thinking":"Send";state.textContent=x?"Working...":"Ready"}
 
-async function loadModels(){try{const res=await fetch("/api/models");const data=await res.json();modelSelect.innerHTML="";for(const m of data.models){const o=document.createElement("option");o.value=m;o.textContent=m;modelSelect.appendChild(o)}if(data.models.includes("qwen2.5-coder:7b"))modelSelect.value="qwen2.5-coder:7b"}catch{modelSelect.innerHTML='<option value="qwen2.5-coder:7b">qwen2.5-coder:7b</option>'}}
+async function loadModels(){try{const res=await fetch("/api/models");const data=await res.json();modelSelect.innerHTML='<option value="auto">auto</option>';for(const m of data.models){const o=document.createElement("option");o.value=m;o.textContent=m;modelSelect.appendChild(o)}}catch{modelSelect.innerHTML='<option value="auto">auto</option><option value="qwen2.5-coder:7b">qwen2.5-coder:7b</option>'}}
 async function loadProjects(){const res=await fetch("/projects");const data=await res.json();projectSelect.innerHTML="";for(const p of data.projects){const o=document.createElement("option");o.value=p;o.textContent=p;projectSelect.appendChild(o)}if(data.projects.includes("forcehub"))projectSelect.value="forcehub";await loadFiles()}
 async function loadFiles(){const res=await fetch("/api/files?project="+encodeURIComponent(projectSelect.value));const data=await res.json();fileSelect.innerHTML="";for(const f of data.files){const o=document.createElement("option");o.value=f;o.textContent=f;fileSelect.appendChild(o)}}
 
@@ -381,11 +449,16 @@ async function fileAction(action){
  try{const res=await fetch("/api/file-action",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({action,model:modelSelect.value,project:projectSelect.value,file:fileSelect.value})});const data=await res.json();addMessage(data.text||data.error||"No response",data.error?"ai error":"ai")}catch(e){addMessage("Request error: "+e,"ai error")}finally{busy(false)}
 }
 
+async function viewFile(){const res=await fetch("/api/file-content?project="+encodeURIComponent(projectSelect.value)+"&file="+encodeURIComponent(fileSelect.value));const data=await res.json();editor.value=data.content||data.text||"";addMessage("Loaded file: "+fileSelect.value,"ai")}
+async function saveFile(){if(!confirm("Save file with .bak backup?"))return;const res=await fetch("/api/save-file",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({project:projectSelect.value,file:fileSelect.value,content:editor.value,backup:true})});const data=await res.json();addMessage(data.text||data.error||"Saved",data.error?"ai error":"ai")}
 async function gitInfo(){const res=await fetch("/api/git?project="+encodeURIComponent(projectSelect.value));const data=await res.json();addMessage(data.text||JSON.stringify(data,null,2),"ai")}
 async function gitDiff(){const res=await fetch("/api/git-diff?project="+encodeURIComponent(projectSelect.value));const data=await res.json();addMessage(data.text||"No diff","ai")}
-async function commitFromDiff(){busy(true);try{const res=await fetch("/api/commit-from-diff",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({project:projectSelect.value,model:modelSelect.value})});const data=await res.json();addMessage(data.text||data.error||"No response",data.error?"ai error":"ai")}finally{busy(false)}}
+async function commitFromDiff(){busy(true);try{const res=await fetch("/api/commit-from-diff",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({project:projectSelect.value,model:modelSelect.value,action:"commit"})});const data=await res.json();addMessage(data.text||data.error||"No response",data.error?"ai error":"ai")}finally{busy(false)}}
 async function searchProject(){const q=searchBox.value.trim();if(!q)return;const res=await fetch("/api/search",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({project:projectSelect.value,query:q})});const data=await res.json();addMessage(data.text||"No results","ai")}
-async function clearChat(){await fetch("/api/reset",{method:"POST"});chat.innerHTML="";addMessage("Memory cleared.","ai")}
+async function runCommand(command){busy(true);try{const res=await fetch("/api/run-command",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({project:projectSelect.value,command})});const data=await res.json();addMessage(data.text||data.error||"No output",data.error?"ai error":"ai")}finally{busy(false)}}
+async function cacheProject(){busy(true);try{const res=await fetch("/api/cache-project",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({project:projectSelect.value,model:modelSelect.value,action:"analyze"})});const data=await res.json();addMessage(data.text||data.error||"Cached",data.error?"ai error":"ai")}finally{busy(false)}}
+async function showDebug(){const res=await fetch("/api/debug");const data=await res.json();addMessage(JSON.stringify(data,null,2),"ai")}
+async function clearChat(){await fetch("/api/reset",{method:"POST"});chat.innerHTML="";chat.appendChild(editor);editor.value="";addMessage("Memory cleared.","ai")}
 
 promptBox.addEventListener("keydown",e=>{if(e.key==="Enter"&&!e.shiftKey){e.preventDefault();sendMessage()}});
 loadModels();loadProjects();
@@ -418,9 +491,22 @@ def api_files(project: str = DEFAULT_PROJECT):
 
 @app.get("/api/file-content")
 def api_file_content(project: str, file: str):
-    root = safe_project_path(project)
     target = safe_file_path(project, file)
-    return {"text": read_file_safe(target, root)}
+    return {"content": target.read_text(encoding="utf-8", errors="replace")}
+
+
+@app.post("/api/save-file")
+def api_save_file(req: SaveFileRequest):
+    try:
+        target = safe_file_path(req.project, req.file)
+        if req.backup:
+            backup = target.with_suffix(target.suffix + f".bak-{datetime.now().strftime('%Y%m%d-%H%M%S')}")
+            backup.write_text(target.read_text(encoding="utf-8", errors="replace"), encoding="utf-8")
+
+        target.write_text(req.content, encoding="utf-8")
+        return {"text": f"Saved {req.file}"}
+    except Exception as e:
+        return {"error": True, "text": str(e)}
 
 
 @app.get("/api/git")
@@ -436,7 +522,7 @@ def api_git_diff(project: str = DEFAULT_PROJECT):
     diff = run_git(project, ["diff", "--", "."])
     staged = run_git(project, ["diff", "--cached", "--", "."])
     text = f"UNSTAGED DIFF:\\n{diff or 'none'}\\n\\nSTAGED DIFF:\\n{staged or 'none'}"
-    return {"text": text[:20000]}
+    return {"text": text[:25000]}
 
 
 @app.post("/api/commit-from-diff")
@@ -460,7 +546,8 @@ DIFF:
 {combined[:16000]}
 """
 
-        answer, used_model = ask_with_fallback(prompt, req.model)
+        answer, used_model, elapsed = ask_with_fallback(prompt, req.model)
+        LAST_DEBUG.update({"model": used_model, "elapsed": elapsed, "action": "commit_from_diff"})
         return {"text": answer, "model": used_model}
     except Exception as e:
         return {"error": True, "text": str(e)}
@@ -476,6 +563,11 @@ def api_models():
         return {"models": models or ["qwen2.5-coder:7b"]}
     except Exception:
         return {"models": ["qwen2.5-coder:7b", "qwen2.5-coder:1.5b"]}
+
+
+@app.get("/api/debug")
+def api_debug():
+    return LAST_DEBUG
 
 
 @app.post("/api/reset")
@@ -513,11 +605,27 @@ def api_search(req: SearchRequest):
         return {"error": True, "text": str(e)}
 
 
+@app.post("/api/run-command")
+def api_run_command(req: RunCommandRequest):
+    commands = {
+        "git_status": ["git", "status", "--short"],
+        "pytest": ["python3", "-m", "pytest", "-q"],
+        "ruff": ["python3", "-m", "ruff", "check", "."],
+        "python_compile": ["python3", "-m", "compileall", "-q", "."],
+    }
+
+    try:
+        output = run_cmd(req.project, commands[req.command], timeout=60)
+        return {"text": output or "Command finished with no output."}
+    except Exception as e:
+        return {"error": True, "text": str(e)}
+
+
 @app.post("/api/chat")
 def api_chat(req: ChatRequest):
     try:
         prompt = build_prompt(req.prompt, req.mode, req.project, req.project_mode)
-        answer, used_model = ask_with_fallback(prompt, req.model)
+        answer, used_model, elapsed = ask_with_fallback(prompt, req.model)
 
         CHAT_HISTORY.append({"role": "user", "content": req.prompt})
         CHAT_HISTORY.append({"role": "assistant", "content": answer})
@@ -526,7 +634,8 @@ def api_chat(req: ChatRequest):
         save_chat("user", req.prompt)
         save_chat("assistant", answer)
 
-        return {"text": answer, "model": used_model}
+        LAST_DEBUG.update({"model": used_model, "elapsed": elapsed, "action": "chat"})
+        return {"text": answer, "model": used_model, "elapsed": elapsed}
     except Exception as e:
         return {"error": True, "text": str(e)}
 
@@ -554,8 +663,39 @@ Project context:
 Answer clearly and practically.
 """
 
-        answer, used_model = ask_with_fallback(final_prompt, req.model)
+        answer, used_model, elapsed = ask_with_fallback(final_prompt, req.model)
+        LAST_DEBUG.update({"model": used_model, "elapsed": elapsed, "action": req.action})
         return {"text": answer, "action": req.action, "model": used_model}
+    except Exception as e:
+        return {"error": True, "text": str(e)}
+
+
+@app.post("/api/cache-project")
+def cache_project(req: ProjectActionRequest):
+    try:
+        context = build_project_context(req.project)
+        prompt = f"""Create a concise but useful technical summary of this project for future AI context.
+
+Include:
+- purpose
+- main files
+- endpoints/features
+- risks
+- next improvements
+
+PROJECT:
+{context}
+"""
+        answer, used_model, elapsed = ask_with_fallback(prompt, req.model)
+        cache = load_cache()
+        cache[req.project] = {
+            "updated": datetime.now().isoformat(timespec="seconds"),
+            "model": used_model,
+            "summary": answer,
+        }
+        save_cache(cache)
+        LAST_DEBUG.update({"model": used_model, "elapsed": elapsed, "action": "cache_project"})
+        return {"text": f"Cached project summary.\\n\\n{answer}", "model": used_model}
     except Exception as e:
         return {"error": True, "text": str(e)}
 
@@ -585,7 +725,8 @@ File content:
 Answer clearly and practically.
 """
 
-        answer, used_model = ask_with_fallback(final_prompt, req.model)
+        answer, used_model, elapsed = ask_with_fallback(final_prompt, req.model)
+        LAST_DEBUG.update({"model": used_model, "elapsed": elapsed, "action": f"file_{req.action}"})
         return {"text": answer, "file": req.file, "action": req.action, "model": used_model}
     except Exception as e:
         return {"error": True, "text": str(e)}
