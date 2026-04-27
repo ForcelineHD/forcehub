@@ -10,7 +10,7 @@ from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 
 APP_NAME = "forcehub"
-APP_VERSION = "0.5.0"
+APP_VERSION = "0.6.0"
 
 PROJECTS_DIR = Path("/home/flozi/projects")
 DEFAULT_PROJECT = "forcehub"
@@ -22,6 +22,7 @@ OLLAMA_TAGS_URL = "http://127.0.0.1:11434/api/tags"
 
 MAX_FILE_CHARS = 6000
 MAX_PROJECT_FILES = 15
+MAX_SEARCH_RESULTS = 50
 
 app = FastAPI(
     title="ForceHub",
@@ -59,6 +60,16 @@ class ProjectActionRequest(BaseModel):
     project: str = DEFAULT_PROJECT
 
 
+class SearchRequest(BaseModel):
+    project: str = DEFAULT_PROJECT
+    query: str
+
+
+class SaveReadmeRequest(BaseModel):
+    project: str = DEFAULT_PROJECT
+    content: str
+
+
 def safe_project_path(project: str) -> Path:
     base = PROJECTS_DIR.resolve()
     target = (PROJECTS_DIR / project).resolve()
@@ -87,16 +98,35 @@ def safe_file_path(project: str, file: str) -> Path:
 
 def should_include_file(path: Path) -> bool:
     blocked_dirs = {
-        ".git", ".venv", "venv", "__pycache__", "node_modules",
-        ".mypy_cache", ".pytest_cache", ".ruff_cache", "dist", "build", "data",
+        ".git",
+        ".venv",
+        "venv",
+        "__pycache__",
+        "node_modules",
+        ".mypy_cache",
+        ".pytest_cache",
+        ".ruff_cache",
+        "dist",
+        "build",
+        "data",
     }
 
     if any(part in blocked_dirs for part in path.parts):
         return False
 
     allowed_ext = {
-        ".py", ".md", ".txt", ".toml", ".json", ".yaml", ".yml",
-        ".html", ".css", ".js", ".ts", ".sh",
+        ".py",
+        ".md",
+        ".txt",
+        ".toml",
+        ".json",
+        ".yaml",
+        ".yml",
+        ".html",
+        ".css",
+        ".js",
+        ".ts",
+        ".sh",
     }
 
     return path.suffix.lower() in allowed_ext or path.name in {"Dockerfile", ".gitignore"}
@@ -213,7 +243,7 @@ def run_git(project: str, args: list[str]) -> str:
             cwd=root,
             stderr=subprocess.STDOUT,
             text=True,
-            timeout=10,
+            timeout=20,
         )
         return out.strip()
     except subprocess.CalledProcessError as e:
@@ -234,7 +264,7 @@ def home():
 :root{--bg:#0f1117;--panel:#151924;--panel2:#111521;--border:#252b3a;--text:#e6e6e6;--muted:#8d96aa;--blue:#4f7cff;--user:#1f3a5f;--ai:#1d2230}
 *{box-sizing:border-box}
 body{margin:0;font-family:Arial,Helvetica,sans-serif;background:var(--bg);color:var(--text)}
-.layout{display:grid;grid-template-columns:310px 1fr;height:100vh}
+.layout{display:grid;grid-template-columns:330px 1fr;height:100vh}
 .sidebar{background:var(--panel);border-right:1px solid var(--border);padding:18px;overflow:auto}
 .sidebar h2{margin:0 0 8px;color:#8ab4ff}.small{color:var(--muted);font-size:13px}
 .sidebar a{color:#b7c7ff;display:block;margin:10px 0;text-decoration:none}
@@ -242,7 +272,7 @@ body{margin:0;font-family:Arial,Helvetica,sans-serif;background:var(--bg);color:
 select,input{width:100%;background:#0f1117;color:var(--text);border:1px solid #30384d;border-radius:8px;padding:8px}
 .main{display:flex;flex-direction:column;height:100vh}.header{padding:14px 22px;border-bottom:1px solid var(--border);background:var(--panel2);display:flex;justify-content:space-between;align-items:center}
 .header h2{margin:0}.chat{flex:1;overflow-y:auto;padding:22px}
-.msg{max-width:980px;padding:14px 16px;margin-bottom:14px;border-radius:12px;white-space:pre-wrap;line-height:1.48;font-size:14px}
+.msg{max-width:1050px;padding:14px 16px;margin-bottom:14px;border-radius:12px;white-space:pre-wrap;line-height:1.48;font-size:14px}
 .user{background:var(--user);margin-left:auto}.ai{background:var(--ai);border:1px solid #2b3245}.error{background:#3a1d24;border:1px solid #6d2b39}
 .inputbar{display:flex;gap:10px;padding:16px;border-top:1px solid var(--border);background:var(--panel2)}
 textarea{flex:1;resize:none;height:60px;border-radius:10px;border:1px solid #30384d;background:#0f1117;color:#eee;padding:12px;font-size:15px}
@@ -285,27 +315,35 @@ button:disabled{background:#3a3f50;cursor:wait}.secondary{background:#2a3040;wid
 <label>Project actions</label>
 <button class="action" onclick="runAction('analyze')">Analyze project</button>
 <button class="action" onclick="runAction('bugs')">Find project bugs</button>
-<button class="action" onclick="runAction('readme')">Generate README</button>
-<button class="action" onclick="runAction('commit')">Commit message</button>
+<button class="action" onclick="runAction('readme')">Generate README text</button>
+<button class="action" onclick="runAction('commit')">AI commit message</button>
 </div>
 
 <div class="control">
 <label>Git helper</label>
 <button class="action" onclick="gitInfo()">Show Git status</button>
+<button class="action" onclick="gitDiff()">Show Git diff</button>
+<button class="action" onclick="commitFromDiff()">Commit msg from diff</button>
+</div>
+
+<div class="control">
+<label>Search project</label>
+<input id="search" placeholder="Search text...">
+<button class="action" onclick="searchProject()">Search</button>
 </div>
 
 <button class="secondary" onclick="clearChat()">Clear Memory</button>
-<div class="control small">Backend: Ollama<br>Version: 0.5.0</div>
+<div class="control small">Backend: Ollama<br>Version: 0.6.0</div>
 </aside>
 
 <main class="main">
 <div class="header">
-<div><h2>ForceHub Chat Pro</h2><div class="small">Project-aware + file-aware + Git helper</div></div>
+<div><h2>ForceHub Chat Pro</h2><div class="small">File-aware + Git diff + README + search</div></div>
 <div id="state" class="badge">Ready</div>
 </div>
 
 <div id="chat" class="chat">
-<div class="msg ai">Ready. Pick a file or enable project context.</div>
+<div class="msg ai">Ready. Pick a file, use Git helper, or enable project context.</div>
 </div>
 
 <div class="inputbar">
@@ -316,7 +354,7 @@ button:disabled{background:#3a3f50;cursor:wait}.secondary{background:#2a3040;wid
 </div>
 
 <script>
-const chat=document.getElementById("chat"),promptBox=document.getElementById("prompt"),sendBtn=document.getElementById("send"),state=document.getElementById("state"),modelSelect=document.getElementById("model"),modeSelect=document.getElementById("mode"),projectSelect=document.getElementById("project"),projectMode=document.getElementById("projectMode"),fileSelect=document.getElementById("file");
+const chat=document.getElementById("chat"),promptBox=document.getElementById("prompt"),sendBtn=document.getElementById("send"),state=document.getElementById("state"),modelSelect=document.getElementById("model"),modeSelect=document.getElementById("mode"),projectSelect=document.getElementById("project"),projectMode=document.getElementById("projectMode"),fileSelect=document.getElementById("file"),searchBox=document.getElementById("search");
 
 function addMessage(text,cls){const div=document.createElement("div");div.className="msg "+cls;div.textContent=text;chat.appendChild(div);chat.scrollTop=chat.scrollHeight}
 function busy(x){sendBtn.disabled=x;sendBtn.textContent=x?"Thinking":"Send";state.textContent=x?"Working...":"Ready"}
@@ -344,6 +382,9 @@ async function fileAction(action){
 }
 
 async function gitInfo(){const res=await fetch("/api/git?project="+encodeURIComponent(projectSelect.value));const data=await res.json();addMessage(data.text||JSON.stringify(data,null,2),"ai")}
+async function gitDiff(){const res=await fetch("/api/git-diff?project="+encodeURIComponent(projectSelect.value));const data=await res.json();addMessage(data.text||"No diff","ai")}
+async function commitFromDiff(){busy(true);try{const res=await fetch("/api/commit-from-diff",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({project:projectSelect.value,model:modelSelect.value})});const data=await res.json();addMessage(data.text||data.error||"No response",data.error?"ai error":"ai")}finally{busy(false)}}
+async function searchProject(){const q=searchBox.value.trim();if(!q)return;const res=await fetch("/api/search",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({project:projectSelect.value,query:q})});const data=await res.json();addMessage(data.text||"No results","ai")}
 async function clearChat(){await fetch("/api/reset",{method:"POST"});chat.innerHTML="";addMessage("Memory cleared.","ai")}
 
 promptBox.addEventListener("keydown",e=>{if(e.key==="Enter"&&!e.shiftKey){e.preventDefault();sendMessage()}});
@@ -372,7 +413,14 @@ def api_files(project: str = DEFAULT_PROJECT):
         for p in root.rglob("*")
         if p.is_file() and should_include_file(p)
     ]
-    return {"files": sorted(files)[:200]}
+    return {"files": sorted(files)[:300]}
+
+
+@app.get("/api/file-content")
+def api_file_content(project: str, file: str):
+    root = safe_project_path(project)
+    target = safe_file_path(project, file)
+    return {"text": read_file_safe(target, root)}
 
 
 @app.get("/api/git")
@@ -381,6 +429,41 @@ def api_git(project: str = DEFAULT_PROJECT):
     branch = run_git(project, ["branch", "--show-current"])
     log = run_git(project, ["log", "--oneline", "-5"])
     return {"text": f"Branch: {branch}\\n\\nStatus:\\n{status or 'clean'}\\n\\nLast commits:\\n{log}"}
+
+
+@app.get("/api/git-diff")
+def api_git_diff(project: str = DEFAULT_PROJECT):
+    diff = run_git(project, ["diff", "--", "."])
+    staged = run_git(project, ["diff", "--cached", "--", "."])
+    text = f"UNSTAGED DIFF:\\n{diff or 'none'}\\n\\nSTAGED DIFF:\\n{staged or 'none'}"
+    return {"text": text[:20000]}
+
+
+@app.post("/api/commit-from-diff")
+def api_commit_from_diff(req: ProjectActionRequest):
+    try:
+        diff = run_git(req.project, ["diff", "--", "."])
+        staged = run_git(req.project, ["diff", "--cached", "--", "."])
+        combined = f"UNSTAGED DIFF:\\n{diff}\\n\\nSTAGED DIFF:\\n{staged}"
+
+        if not diff.strip() and not staged.strip():
+            return {"text": "No git diff found. Nothing to summarize."}
+
+        prompt = f"""Generate a clean git commit message for this diff.
+
+Rules:
+- First line: short conventional commit style if suitable.
+- Then 3-5 bullet changelog items.
+- Be specific and practical.
+
+DIFF:
+{combined[:16000]}
+"""
+
+        answer, used_model = ask_with_fallback(prompt, req.model)
+        return {"text": answer, "model": used_model}
+    except Exception as e:
+        return {"error": True, "text": str(e)}
 
 
 @app.get("/api/models")
@@ -399,6 +482,35 @@ def api_models():
 def reset_chat():
     CHAT_HISTORY.clear()
     return {"status": "cleared"}
+
+
+@app.post("/api/search")
+def api_search(req: SearchRequest):
+    try:
+        root = safe_project_path(req.project)
+        q = req.query.lower()
+        results = []
+
+        for path in root.rglob("*"):
+            if not path.is_file() or not should_include_file(path):
+                continue
+
+            rel = str(path.relative_to(root))
+            text = path.read_text(encoding="utf-8", errors="replace")
+            lines = text.splitlines()
+
+            for i, line in enumerate(lines, start=1):
+                if q in line.lower():
+                    results.append(f"{rel}:{i}: {line.strip()}")
+                    if len(results) >= MAX_SEARCH_RESULTS:
+                        break
+
+            if len(results) >= MAX_SEARCH_RESULTS:
+                break
+
+        return {"text": "\\n".join(results) if results else "No results found."}
+    except Exception as e:
+        return {"error": True, "text": str(e)}
 
 
 @app.post("/api/chat")
@@ -475,6 +587,17 @@ Answer clearly and practically.
 
         answer, used_model = ask_with_fallback(final_prompt, req.model)
         return {"text": answer, "file": req.file, "action": req.action, "model": used_model}
+    except Exception as e:
+        return {"error": True, "text": str(e)}
+
+
+@app.post("/api/save-readme")
+def save_readme(req: SaveReadmeRequest):
+    try:
+        root = safe_project_path(req.project)
+        readme = root / "README.md"
+        readme.write_text(req.content, encoding="utf-8")
+        return {"text": f"Saved README.md to {readme}"}
     except Exception as e:
         return {"error": True, "text": str(e)}
 
