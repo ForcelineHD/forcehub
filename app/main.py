@@ -85,7 +85,18 @@ class DiffContentRequest(BaseModel):
 
 class RunCommandRequest(BaseModel):
     project: str = DEFAULT_PROJECT
-    command: Literal["git_status", "pytest", "ruff", "ruff_fix", "python_compile", "cpp_compile", "cmake_configure", "cmake_build"]
+    command: Literal["git_status", "pytest", "ruff", "ruff_fix", "python_compile", "cpp_compile", "cmake_configure", "cmake_build", "cppcheck", "clang_tidy", "bandit", "npm_test", "npm_build", "npm_audit", "health"]
+
+
+
+class ExplainOutputRequest(BaseModel):
+    project: str = DEFAULT_PROJECT
+    output: str
+    model: str = "auto"
+
+
+class CreateCppProjectRequest(BaseModel):
+    project: str
 
 
 def safe_project_path(project: str) -> Path:
@@ -246,6 +257,86 @@ def run_git(project: str, args: list[str]) -> str:
     return run_cmd(project, ["git", *args], timeout=20)
 
 
+
+def command_exists(project: str, command: str) -> bool:
+    out = run_cmd(project, ["bash", "-lc", f"command -v {command} >/dev/null 2>&1 && echo yes || echo no"], timeout=10)
+    return out.strip() == "yes"
+
+
+def detect_project_type(project: str) -> dict:
+    root = safe_project_path(project)
+
+    files = {p.name for p in root.iterdir() if p.is_file()}
+    has_py = any(root.rglob("*.py"))
+    has_cpp = any(root.rglob(pattern) for pattern in ("*.cpp", "*.cc", "*.cxx", "*.hpp", "*.h"))
+    has_node = "package.json" in files
+
+    detected = []
+    if has_py or "pyproject.toml" in files or "requirements.txt" in files:
+        detected.append("python")
+    if has_cpp or "CMakeLists.txt" in files or "Makefile" in files:
+        detected.append("cpp")
+    if has_node:
+        detected.append("node")
+
+    return {
+        "types": detected or ["unknown"],
+        "python": {
+            "pyproject": "pyproject.toml" in files,
+            "requirements": "requirements.txt" in files,
+            "pytest": command_exists(project, "pytest"),
+            "ruff": command_exists(project, "ruff"),
+            "bandit": command_exists(project, "bandit"),
+        },
+        "cpp": {
+            "cmake": "CMakeLists.txt" in files,
+            "makefile": "Makefile" in files,
+            "gpp": command_exists(project, "g++"),
+            "clangpp": command_exists(project, "clang++"),
+            "cppcheck": command_exists(project, "cppcheck"),
+            "clang_tidy": command_exists(project, "clang-tidy"),
+        },
+        "node": {
+            "package_json": has_node,
+            "npm": command_exists(project, "npm"),
+        },
+    }
+
+
+def project_health(project: str) -> str:
+    root = safe_project_path(project)
+
+    checks = []
+    checks.append(("Git repo", (root / ".git").exists()))
+    checks.append(("README exists", (root / "README.md").exists()))
+    checks.append(("License exists", any((root / name).exists() for name in ["LICENSE", "LICENSE.md", "COPYING"])))
+    checks.append(("Python app exists", any(root.rglob("*.py"))))
+    checks.append(("C++ files exist", any(root.rglob("*.cpp")) or any(root.rglob("*.cc")) or any(root.rglob("*.cxx"))))
+    checks.append(("CMake exists", (root / "CMakeLists.txt").exists()))
+    checks.append(("package.json exists", (root / "package.json").exists()))
+
+    git_status = run_git(project, ["status", "--short"]) if (root / ".git").exists() else "not a git repo"
+    checks.append(("Git clean", git_status.strip() == ""))
+
+    score = sum(1 for _, ok in checks if ok)
+    total = len(checks)
+
+    lines = [f"Project health: {score}/{total}", ""]
+    for name, ok in checks:
+        lines.append(f"{'OK' if ok else 'MISS'} - {name}")
+
+    lines.append("")
+    lines.append("Git status:")
+    lines.append(git_status or "clean")
+
+    detected = detect_project_type(project)
+    lines.append("")
+    lines.append("Detected:")
+    lines.append(str(detected))
+
+    return "\\n".join(lines)
+
+
 @app.get("/", response_class=HTMLResponse)
 def home():
     return """
@@ -324,6 +415,18 @@ button:disabled{background:#3a3f50;cursor:wait}.secondary{background:#2a3040;wid
 <button class="action" onclick="runCommand('python_compile')">compile</button>
 <button class="action" onclick="runCommand('pytest')">pytest</button>
 <button class="action" onclick="runCommand('ruff')">ruff</button>
+<button class="action" onclick="runCommand('cppcheck')">cppcheck</button>
+<button class="action" onclick="runCommand('clang_tidy')">clang-tidy</button>
+<button class="action" onclick="runCommand('bandit')">bandit</button>
+<button class="action" onclick="runCommand('npm_test')">npm test</button>
+<button class="action" onclick="runCommand('npm_build')">npm build</button>
+<button class="action" onclick="runCommand('npm_audit')">npm audit</button>
+
+<button class="action" onclick="detectProject()">detect type</button>
+<button class="action" onclick="runCommand('health')">health score</button>
+<button class="action" onclick="explainLast()">explain last output</button>
+<button class="action" onclick="createCppProject()">new C++ project</button>
+
 <button class="action" onclick="runCommand('cpp_compile')">C++ compile</button>
 <button class="action" onclick="runCommand('cmake_configure')">cmake config</button>
 <button class="action" onclick="runCommand('cmake_build')">cmake build</button>
@@ -386,10 +489,53 @@ async function gitInfo(){const res=await fetch("/api/git?project="+encodeURIComp
 async function gitDiff(){const res=await fetch("/api/git-diff?project="+encodeURIComponent(projectSelect.value));const data=await res.json();addMessage(data.text||"No diff","ai")}
 async function commitFromDiff(){busy(true);try{const res=await fetch("/api/commit-from-diff",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({project:projectSelect.value,model:modelSelect.value,action:"commit"})});const data=await res.json();addMessage(data.text||data.error||"No response",data.error?"ai error":"ai")}finally{busy(false)}}
 async function searchProject(){const q=searchBox.value.trim();if(!q)return;const res=await fetch("/api/search",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({project:projectSelect.value,query:q})});const data=await res.json();addMessage(data.text||"No results","ai")}
-async function runCommand(command){busy(true);try{const res=await fetch("/api/run-command",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({project:projectSelect.value,command})});const data=await res.json();addMessage(data.text||data.error||"No output",data.error?"ai error":"ai")}finally{busy(false)}}
+async function runCommand(command){busy(true);try{const res=await fetch("/api/run-command",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({project:projectSelect.value,command})});const data=await res.json();lastOutput = data.text || data.error || "No output"; addMessage(lastOutput,data.error?"ai error":"ai")}finally{busy(false)}}
 async function cacheProject(){busy(true);try{const res=await fetch("/api/cache-project",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({project:projectSelect.value,model:modelSelect.value,action:"analyze"})});const data=await res.json();addMessage(data.text||data.error||"Cached",data.error?"ai error":"ai")}finally{busy(false)}}
 async function showDebug(){const res=await fetch("/api/debug");const data=await res.json();addMessage(JSON.stringify(data,null,2),"ai")}
 async function clearChat(){await fetch("/api/reset",{method:"POST"});chat.innerHTML="";chat.appendChild(editor);editor.value="";addMessage("Memory cleared.","ai")}
+
+let lastOutput = "";
+
+async function detectProject(){
+  const res = await fetch("/api/detect?project="+encodeURIComponent(projectSelect.value));
+  const data = await res.json();
+  lastOutput = JSON.stringify(data, null, 2);
+  addMessage(lastOutput, "ai");
+}
+
+async function explainLast(){
+  if(!lastOutput.trim()){
+    addMessage("No previous command output to explain.", "ai error");
+    return;
+  }
+  busy(true);
+  try{
+    const res = await fetch("/api/explain-output", {
+      method:"POST",
+      headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({project:projectSelect.value, output:lastOutput, model:modelSelect.value})
+    });
+    const data = await res.json();
+    addMessage(data.text || data.error || "No response", data.error ? "ai error" : "ai");
+  } finally {
+    busy(false);
+  }
+}
+
+async function createCppProject(){
+  const name = prompt("New C++ project folder name:");
+  if(!name) return;
+  const res = await fetch("/api/create-cpp-project", {
+    method:"POST",
+    headers:{"Content-Type":"application/json"},
+    body:JSON.stringify({project:name})
+  });
+  const data = await res.json();
+  addMessage(data.text || data.error || "Done", data.error ? "ai error" : "ai");
+  await loadProjects();
+}
+
+
 promptBox.addEventListener("keydown",e=>{if(e.key==="Enter"&&!e.shiftKey){e.preventDefault();sendMessage()}});
 loadModels();loadProjects();
 </script>
@@ -538,11 +684,49 @@ def api_run_command(req: RunCommandRequest):
         "ruff": ["python3", "-m", "ruff", "check", "."],
         "ruff_fix": ["python3", "-m", "ruff", "check", ".", "--fix"],
         "python_compile": ["python3", "-m", "compileall", "-q", "."],
-        "cpp_compile": ["bash", "-lc", "shopt -s nullglob globstar; files=(**/*.cpp **/*.cc **/*.cxx); if [ ${#files[@]} -eq 0 ]; then echo No C++ source files found.; else g++ -std=c++20 -Wall -Wextra -pedantic -fsyntax-only ${files[@]}; fi"],
+        "cpp_compile": [
+            "bash",
+            "-lc",
+            "shopt -s nullglob globstar; files=(**/*.cpp **/*.cc **/*.cxx); if [ ${#files[@]} -eq 0 ]; then echo No C++ source files found.; else g++ -std=c++20 -Wall -Wextra -pedantic -fsyntax-only ${files[@]}; fi",
+        ],
         "cmake_configure": ["bash", "-lc", "cmake -S . -B build"],
         "cmake_build": ["bash", "-lc", "cmake --build build -j$(nproc)"],
+        "cppcheck": [
+            "bash",
+            "-lc",
+            "command -v cppcheck >/dev/null 2>&1 || { echo 'cppcheck not installed. Run: sudo apt install cppcheck'; exit 0; }; cppcheck --enable=warning,performance,portability,style --std=c++20 --suppress=missingIncludeSystem .",
+        ],
+        "clang_tidy": [
+            "bash",
+            "-lc",
+            "command -v clang-tidy >/dev/null 2>&1 || { echo 'clang-tidy not installed. Run: sudo apt install clang-tidy'; exit 0; }; files=$(find . -type f \( -name '*.cpp' -o -name '*.cc' -o -name '*.cxx' \) | head -20); if [ -z \"$files\" ]; then echo No C++ source files found.; else clang-tidy $files -- -std=c++20; fi",
+        ],
+        "bandit": [
+            "bash",
+            "-lc",
+            "command -v bandit >/dev/null 2>&1 || { echo 'bandit not installed. Run: pip install bandit'; exit 0; }; bandit -r . -x .venv,venv,__pycache__,data",
+        ],
+        "npm_test": [
+            "bash",
+            "-lc",
+            "if [ ! -f package.json ]; then echo package.json not found.; elif ! command -v npm >/dev/null 2>&1; then echo npm not installed.; else npm test; fi",
+        ],
+        "npm_build": [
+            "bash",
+            "-lc",
+            "if [ ! -f package.json ]; then echo package.json not found.; elif ! command -v npm >/dev/null 2>&1; then echo npm not installed.; else npm run build; fi",
+        ],
+        "npm_audit": [
+            "bash",
+            "-lc",
+            "if [ ! -f package.json ]; then echo package.json not found.; elif ! command -v npm >/dev/null 2>&1; then echo npm not installed.; else npm audit; fi",
+        ],
+        "health": ["bash", "-lc", "echo health"],
     }
     try:
+        if req.command == "health":
+            return {"text": project_health(req.project)}
+
         output = run_cmd(req.project, commands[req.command], timeout=90)
         return {"text": output or "Command finished with no output."}
     except Exception as e:
@@ -668,6 +852,76 @@ def save_readme(req: SaveReadmeRequest):
         readme = root / "README.md"
         readme.write_text(req.content, encoding="utf-8")
         return {"text": f"Saved README.md to {readme}"}
+    except Exception as e:
+        return {"error": True, "text": str(e)}
+
+
+
+@app.get("/api/detect")
+def api_detect(project: str = DEFAULT_PROJECT):
+    try:
+        return detect_project_type(project)
+    except Exception as e:
+        return {"error": True, "text": str(e)}
+
+
+@app.post("/api/explain-output")
+def api_explain_output(req: ExplainOutputRequest):
+    try:
+        prompt = f"""Explain this build/test/lint output and give practical fixes.
+
+Project: {req.project}
+
+Output:
+{req.output[:12000]}
+
+Rules:
+- Explain the root cause.
+- Give exact next commands.
+- Give code/config fixes only if needed.
+"""
+        answer, used_model, elapsed = ask_with_fallback(prompt, req.model)
+        LAST_DEBUG.update({"model": used_model, "elapsed": elapsed, "action": "explain_output"})
+        return {"text": answer, "model": used_model}
+    except Exception as e:
+        return {"error": True, "text": str(e)}
+
+
+@app.post("/api/create-cpp-project")
+def api_create_cpp_project(req: CreateCppProjectRequest):
+    try:
+        if "/" in req.project or ".." in req.project or not req.project.strip():
+            raise ValueError("Invalid project name")
+
+        root = PROJECTS_DIR / req.project
+        if root.exists():
+            raise ValueError(f"Project already exists: {req.project}")
+
+        (root / "src").mkdir(parents=True)
+        (root / "include").mkdir()
+
+        (root / "src" / "main.cpp").write_text(
+            '#include <iostream>\\n\\nint main() {\\n    std::cout << "Hello from C++20!\\\\n";\\n    return 0;\\n}\\n',
+            encoding="utf-8",
+        )
+
+        (root / "CMakeLists.txt").write_text(
+            'cmake_minimum_required(VERSION 3.20)\\n'
+            f'project({req.project} LANGUAGES CXX)\\n\\n'
+            'set(CMAKE_CXX_STANDARD 20)\\n'
+            'set(CMAKE_CXX_STANDARD_REQUIRED ON)\\n'
+            'set(CMAKE_CXX_EXTENSIONS OFF)\\n\\n'
+            'add_executable(${PROJECT_NAME} src/main.cpp)\\n'
+            'target_compile_options(${PROJECT_NAME} PRIVATE -Wall -Wextra -pedantic)\\n',
+            encoding="utf-8",
+        )
+
+        (root / ".gitignore").write_text("build/\\n*.o\\n*.exe\\n*.out\\n.cache/\\n", encoding="utf-8")
+        (root / "README.md").write_text(f"# {req.project}\\n\\nC++20 CMake project.\\n", encoding="utf-8")
+
+        subprocess.check_output(["git", "init"], cwd=root, text=True, stderr=subprocess.STDOUT)
+
+        return {"text": f"Created C++ project: {root}\\n\\nNext:\\ncd {root}\\ncmake -S . -B build\\ncmake --build build\\n./build/{req.project}"}
     except Exception as e:
         return {"error": True, "text": str(e)}
 
