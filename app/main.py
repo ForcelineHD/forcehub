@@ -1,4 +1,6 @@
 import difflib
+import base64
+import os
 import json
 import subprocess
 import time
@@ -7,8 +9,8 @@ from pathlib import Path
 from typing import Literal
 
 import requests
-from fastapi import FastAPI
-from fastapi.responses import HTMLResponse, StreamingResponse
+from fastapi import FastAPI, Request
+from fastapi.responses import HTMLResponse, PlainTextResponse, StreamingResponse
 from pydantic import BaseModel
 
 APP_NAME = "forcehub"
@@ -19,6 +21,8 @@ DEFAULT_PROJECT = "forcehub"
 DATA_DIR = Path("/home/flozi/projects/forcehub/data")
 CHAT_FILE = DATA_DIR / "chats.json"
 PROJECT_CACHE_FILE = DATA_DIR / "project_cache.json"
+PROJECT_SETTINGS_FILE = DATA_DIR / "project_settings.json"
+FORCEHUB_PASSWORD = os.getenv("FORCEHUB_PASSWORD", "forcehub")
 
 OLLAMA_GENERATE_URL = "http://127.0.0.1:11434/api/generate"
 OLLAMA_TAGS_URL = "http://127.0.0.1:11434/api/tags"
@@ -97,6 +101,65 @@ class ExplainOutputRequest(BaseModel):
 
 class CreateCppProjectRequest(BaseModel):
     project: str
+
+
+
+class ProjectSettingsRequest(BaseModel):
+    project: str = DEFAULT_PROJECT
+    preferred_model: str = "auto"
+    preferred_mode: str = "normal"
+    project_context: bool = False
+
+
+
+def is_auth_disabled() -> bool:
+    return FORCEHUB_PASSWORD.strip() == ""
+
+
+def check_basic_auth(request: Request) -> bool:
+    if is_auth_disabled():
+        return True
+
+    auth = request.headers.get("authorization", "")
+    if not auth.startswith("Basic "):
+        return False
+
+    try:
+        decoded = base64.b64decode(auth.split(" ", 1)[1]).decode("utf-8")
+        username, password = decoded.split(":", 1)
+        return username == "flozi" and password == FORCEHUB_PASSWORD
+    except Exception:
+        return False
+
+
+@app.middleware("http")
+async def forcehub_basic_auth(request: Request, call_next):
+    if request.url.path.startswith("/status"):
+        return await call_next(request)
+
+    if not check_basic_auth(request):
+        return PlainTextResponse(
+            "ForceHub authentication required",
+            status_code=401,
+            headers={"WWW-Authenticate": 'Basic realm="ForceHub"'},
+        )
+
+    return await call_next(request)
+
+
+def load_project_settings() -> dict:
+    DATA_DIR.mkdir(exist_ok=True)
+    if not PROJECT_SETTINGS_FILE.exists():
+        return {}
+    try:
+        return json.loads(PROJECT_SETTINGS_FILE.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+
+def save_project_settings(data: dict) -> None:
+    DATA_DIR.mkdir(exist_ok=True)
+    PROJECT_SETTINGS_FILE.write_text(json.dumps(data, indent=2), encoding="utf-8")
 
 
 def safe_project_path(project: str) -> Path:
@@ -435,6 +498,14 @@ button:disabled{background:#3a3f50;cursor:wait}.secondary{background:#2a3040;wid
 
 <div class="control"><label>Search project</label><input id="search" placeholder="Search text..."><button class="action" onclick="searchProject()">Search</button></div>
 
+
+<div class="control">
+<label>Project settings</label>
+<button class="action" onclick="loadProjectSettings()">Load settings</button>
+<button class="action" onclick="saveProjectSettings()">Save settings</button>
+<div class="small">Saved: model, mode, project context</div>
+</div>
+
 <button class="secondary" onclick="showDebug()">Show debug</button>
 <button class="secondary" onclick="clearChat()">Clear Memory</button>
 <div class="control small">Backend: Ollama<br>Version: 0.8.0</div>
@@ -465,7 +536,7 @@ function addMessage(text,cls){const div=document.createElement("div");div.classN
 function busy(x){sendBtn.disabled=x;sendBtn.textContent=x?"Thinking":"Send";state.textContent=x?"Working...":"Ready"}
 
 async function loadModels(){try{const res=await fetch("/api/models");const data=await res.json();modelSelect.innerHTML='<option value="auto">auto</option>';for(const m of data.models){const o=document.createElement("option");o.value=m;o.textContent=m;modelSelect.appendChild(o)}}catch{modelSelect.innerHTML='<option value="auto">auto</option><option value="qwen2.5-coder:7b">qwen2.5-coder:7b</option>'}}
-async function loadProjects(){const res=await fetch("/projects");const data=await res.json();projectSelect.innerHTML="";for(const p of data.projects){const o=document.createElement("option");o.value=p;o.textContent=p;projectSelect.appendChild(o)}if(data.projects.includes("forcehub"))projectSelect.value="forcehub";await loadFiles()}
+async function loadProjects(){const res=await fetch("/projects");const data=await res.json();projectSelect.innerHTML="";for(const p of data.projects){const o=document.createElement("option");o.value=p;o.textContent=p;projectSelect.appendChild(o)}if(data.projects.includes("forcehub"))projectSelect.value="forcehub";await loadFiles(); await loadProjectSettings()}
 async function loadFiles(){const res=await fetch("/api/files?project="+encodeURIComponent(projectSelect.value));const data=await res.json();fileSelect.innerHTML="";for(const f of data.files){const o=document.createElement("option");o.value=f;o.textContent=f;fileSelect.appendChild(o)}}
 projectSelect.addEventListener("change",loadFiles);
 
@@ -533,6 +604,35 @@ async function createCppProject(){
   const data = await res.json();
   addMessage(data.text || data.error || "Done", data.error ? "ai error" : "ai");
   await loadProjects();
+}
+
+
+
+
+async function loadProjectSettings(){
+  const res = await fetch("/api/project-settings?project="+encodeURIComponent(projectSelect.value));
+  const data = await res.json();
+
+  if(data.preferred_model) modelSelect.value = data.preferred_model;
+  if(data.preferred_mode) modeSelect.value = data.preferred_mode;
+  if(typeof data.project_context === "boolean") projectMode.checked = data.project_context;
+
+  addMessage("Loaded settings for " + projectSelect.value, "ai");
+}
+
+async function saveProjectSettings(){
+  const res = await fetch("/api/project-settings", {
+    method:"POST",
+    headers:{"Content-Type":"application/json"},
+    body:JSON.stringify({
+      project: projectSelect.value,
+      preferred_model: modelSelect.value,
+      preferred_mode: modeSelect.value,
+      project_context: projectMode.checked
+    })
+  });
+  const data = await res.json();
+  addMessage(data.text || data.error || "Settings saved", data.error ? "ai error" : "ai");
 }
 
 
@@ -922,6 +1022,38 @@ def api_create_cpp_project(req: CreateCppProjectRequest):
         subprocess.check_output(["git", "init"], cwd=root, text=True, stderr=subprocess.STDOUT)
 
         return {"text": f"Created C++ project: {root}\\n\\nNext:\\ncd {root}\\ncmake -S . -B build\\ncmake --build build\\n./build/{req.project}"}
+    except Exception as e:
+        return {"error": True, "text": str(e)}
+
+
+
+@app.get("/api/project-settings")
+def api_get_project_settings(project: str = DEFAULT_PROJECT):
+    data = load_project_settings()
+    return data.get(project, {
+        "project": project,
+        "preferred_model": "auto",
+        "preferred_mode": "normal",
+        "project_context": False,
+    })
+
+
+@app.post("/api/project-settings")
+def api_save_project_settings(req: ProjectSettingsRequest):
+    try:
+        safe_project_path(req.project)
+
+        data = load_project_settings()
+        data[req.project] = {
+            "project": req.project,
+            "preferred_model": req.preferred_model,
+            "preferred_mode": req.preferred_mode,
+            "project_context": req.project_context,
+            "updated": datetime.now().isoformat(timespec="seconds"),
+        }
+        save_project_settings(data)
+
+        return {"text": f"Saved settings for {req.project}"}
     except Exception as e:
         return {"error": True, "text": str(e)}
 
