@@ -42,7 +42,7 @@ class StatusResponse(BaseModel):
 class ChatRequest(BaseModel):
     prompt: str
     model: str = "auto"
-    mode: Literal["normal", "code", "short", "explain"] = "normal"
+    mode: Literal["normal", "code", "cpp", "short", "explain"] = "normal"
     project: str = DEFAULT_PROJECT
     project_mode: bool = False
 
@@ -85,7 +85,7 @@ class DiffContentRequest(BaseModel):
 
 class RunCommandRequest(BaseModel):
     project: str = DEFAULT_PROJECT
-    command: Literal["git_status", "pytest", "ruff", "ruff_fix", "python_compile"]
+    command: Literal["git_status", "pytest", "ruff", "ruff_fix", "python_compile", "cpp_compile", "cmake_configure", "cmake_build"]
 
 
 def safe_project_path(project: str) -> Path:
@@ -118,8 +118,9 @@ def should_include_file(path: Path) -> bool:
     allowed_ext = {
         ".py", ".md", ".txt", ".toml", ".json", ".yaml", ".yml",
         ".html", ".css", ".js", ".ts", ".sh",
+        ".c", ".cc", ".cpp", ".cxx", ".h", ".hh", ".hpp", ".hxx",
     }
-    return path.suffix.lower() in allowed_ext or path.name in {"Dockerfile", ".gitignore"}
+    return path.suffix.lower() in allowed_ext or path.name in {"Dockerfile", ".gitignore", "CMakeLists.txt", "Makefile"}
 
 
 def read_file_safe(path: Path, root: Path) -> str:
@@ -166,6 +167,7 @@ def build_prompt(user_prompt: str, mode: str, project: str, project_mode: bool) 
     system = {
         "normal": "You are ForceHub AI. Answer clearly and practically.",
         "code": "You are ForceHub AI coding assistant. Give code-first, practical answers.",
+        "cpp": "You are ForceHub AI C++ assistant. Focus on modern C++20, build systems, compile errors, performance, memory safety, RAII, undefined behavior, headers, CMake, and practical fixes.",
         "short": "Answer briefly and directly. No padding.",
         "explain": "Explain step by step, but avoid unnecessary basics.",
     }.get(mode, "You are ForceHub AI.")
@@ -288,7 +290,7 @@ button:disabled{background:#3a3f50;cursor:wait}.secondary{background:#2a3040;wid
 <div class="control"><label>Project</label><select id="project"></select></div>
 <div class="control"><label>Model</label><select id="model"></select></div>
 <div class="control"><label>Mode</label><select id="mode">
-<option value="normal">Normal</option><option value="code">Code Assistant</option><option value="short">Short Answers</option><option value="explain">Explain Step-by-Step</option>
+<option value="normal">Normal</option><option value="code">Code Assistant</option><option value="cpp">C++ Assistant</option><option value="short">Short Answers</option><option value="explain">Explain Step-by-Step</option>
 </select></div>
 
 <div class="control"><label><input id="projectMode" type="checkbox"> Use project context</label></div>
@@ -322,6 +324,9 @@ button:disabled{background:#3a3f50;cursor:wait}.secondary{background:#2a3040;wid
 <button class="action" onclick="runCommand('python_compile')">compile</button>
 <button class="action" onclick="runCommand('pytest')">pytest</button>
 <button class="action" onclick="runCommand('ruff')">ruff</button>
+<button class="action" onclick="runCommand('cpp_compile')">C++ compile</button>
+<button class="action" onclick="runCommand('cmake_configure')">cmake config</button>
+<button class="action" onclick="runCommand('cmake_build')">cmake build</button>
 </div>
 </div>
 
@@ -533,6 +538,9 @@ def api_run_command(req: RunCommandRequest):
         "ruff": ["python3", "-m", "ruff", "check", "."],
         "ruff_fix": ["python3", "-m", "ruff", "check", ".", "--fix"],
         "python_compile": ["python3", "-m", "compileall", "-q", "."],
+        "cpp_compile": ["bash", "-lc", "shopt -s nullglob globstar; files=(**/*.cpp **/*.cc **/*.cxx); if [ ${#files[@]} -eq 0 ]; then echo No C++ source files found.; else g++ -std=c++20 -Wall -Wextra -pedantic -fsyntax-only ${files[@]}; fi"],
+        "cmake_configure": ["bash", "-lc", "cmake -S . -B build"],
+        "cmake_build": ["bash", "-lc", "cmake --build build -j$(nproc)"],
     }
     try:
         output = run_cmd(req.project, commands[req.command], timeout=90)
