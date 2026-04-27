@@ -1,3 +1,4 @@
+import difflib
 import json
 import subprocess
 import time
@@ -7,11 +8,11 @@ from typing import Literal
 
 import requests
 from fastapi import FastAPI
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, StreamingResponse
 from pydantic import BaseModel
 
 APP_NAME = "forcehub"
-APP_VERSION = "0.7.0"
+APP_VERSION = "0.8.0"
 
 PROJECTS_DIR = Path("/home/flozi/projects")
 DEFAULT_PROJECT = "forcehub"
@@ -26,11 +27,7 @@ MAX_FILE_CHARS = 8000
 MAX_PROJECT_FILES = 15
 MAX_SEARCH_RESULTS = 80
 
-app = FastAPI(
-    title="ForceHub",
-    description="Local project-aware AI dashboard.",
-    version=APP_VERSION,
-)
+app = FastAPI(title="ForceHub", description="Local AI dev dashboard.", version=APP_VERSION)
 
 CHAT_HISTORY: list[dict[str, str]] = []
 LAST_DEBUG: dict[str, str | int | float] = {}
@@ -80,70 +77,48 @@ class SaveFileRequest(BaseModel):
     backup: bool = True
 
 
+class DiffContentRequest(BaseModel):
+    project: str = DEFAULT_PROJECT
+    file: str
+    content: str
+
+
 class RunCommandRequest(BaseModel):
     project: str = DEFAULT_PROJECT
-    command: Literal["git_status", "pytest", "ruff", "python_compile"]
+    command: Literal["git_status", "pytest", "ruff", "ruff_fix", "python_compile"]
 
 
 def safe_project_path(project: str) -> Path:
     base = PROJECTS_DIR.resolve()
     target = (PROJECTS_DIR / project).resolve()
-
     if not str(target).startswith(str(base)):
         raise ValueError("Invalid project path")
-
     if not target.exists() or not target.is_dir():
         raise ValueError(f"Project not found: {project}")
-
     return target
 
 
 def safe_file_path(project: str, file: str) -> Path:
     root = safe_project_path(project)
     target = (root / file).resolve()
-
     if not str(target).startswith(str(root.resolve())):
         raise ValueError("Invalid file path")
-
     if not target.exists() or not target.is_file():
         raise ValueError(f"File not found: {file}")
-
     return target
 
 
 def should_include_file(path: Path) -> bool:
     blocked_dirs = {
-        ".git",
-        ".venv",
-        "venv",
-        "__pycache__",
-        "node_modules",
-        ".mypy_cache",
-        ".pytest_cache",
-        ".ruff_cache",
-        "dist",
-        "build",
-        "data",
+        ".git", ".venv", "venv", "__pycache__", "node_modules",
+        ".mypy_cache", ".pytest_cache", ".ruff_cache", "dist", "build", "data",
     }
-
     if any(part in blocked_dirs for part in path.parts):
         return False
-
     allowed_ext = {
-        ".py",
-        ".md",
-        ".txt",
-        ".toml",
-        ".json",
-        ".yaml",
-        ".yml",
-        ".html",
-        ".css",
-        ".js",
-        ".ts",
-        ".sh",
+        ".py", ".md", ".txt", ".toml", ".json", ".yaml", ".yml",
+        ".html", ".css", ".js", ".ts", ".sh",
     }
-
     return path.suffix.lower() in allowed_ext or path.name in {"Dockerfile", ".gitignore"}
 
 
@@ -159,13 +134,10 @@ def read_file_safe(path: Path, root: Path) -> str:
 def build_project_context(project: str) -> str:
     root = safe_project_path(project)
     chunks = [f"PROJECT: {project}\nROOT: {root}\n"]
-
     files = [p for p in root.rglob("*") if p.is_file() and should_include_file(p)]
     files = sorted(files, key=lambda p: str(p.relative_to(root)))[:MAX_PROJECT_FILES]
-
     for file in files:
         chunks.append(read_file_safe(file, root))
-
     return "\n".join(chunks)
 
 
@@ -184,6 +156,12 @@ def save_cache(data: dict) -> None:
     PROJECT_CACHE_FILE.write_text(json.dumps(data, indent=2), encoding="utf-8")
 
 
+def choose_model(model: str, prompt: str) -> str:
+    if model != "auto":
+        return model
+    return "qwen2.5-coder:1.5b" if len(prompt) < 1200 else "qwen2.5-coder:7b"
+
+
 def build_prompt(user_prompt: str, mode: str, project: str, project_mode: bool) -> str:
     system = {
         "normal": "You are ForceHub AI. Answer clearly and practically.",
@@ -192,14 +170,9 @@ def build_prompt(user_prompt: str, mode: str, project: str, project_mode: bool) 
         "explain": "Explain step by step, but avoid unnecessary basics.",
     }.get(mode, "You are ForceHub AI.")
 
-    history = ""
-    for item in CHAT_HISTORY[-8:]:
-        history += f"{item['role']}: {item['content']}\n"
-
+    history = "".join(f"{i['role']}: {i['content']}\n" for i in CHAT_HISTORY[-8:])
     project_context = build_project_context(project) if project_mode else ""
-
-    cache = load_cache()
-    cached_summary = cache.get(project, {}).get("summary", "")
+    cached_summary = load_cache().get(project, {}).get("summary", "")
 
     return f"""{system}
 
@@ -218,42 +191,23 @@ User request:
 Assistant:"""
 
 
-def choose_model(model: str, prompt: str) -> str:
-    if model != "auto":
-        return model
-
-    if len(prompt) < 1200:
-        return "qwen2.5-coder:1.5b"
-
-    return "qwen2.5-coder:7b"
-
-
 def ask_ollama(prompt: str, model: str) -> tuple[str, str, float]:
     selected_model = choose_model(model, prompt)
     start = time.time()
-
     r = requests.post(
         OLLAMA_GENERATE_URL,
         json={
             "model": selected_model,
             "prompt": prompt,
             "stream": False,
-            "options": {
-                "temperature": 0.2,
-                "top_p": 0.9,
-                "num_ctx": 4096,
-            },
+            "options": {"temperature": 0.2, "top_p": 0.9, "num_ctx": 4096},
         },
         timeout=180,
     )
-
     elapsed = round(time.time() - start, 2)
-
     if r.status_code != 200:
         raise RuntimeError(f"Ollama error {r.status_code}: {r.text}")
-
-    answer = r.json().get("response", "").strip()
-    return answer, selected_model, elapsed
+    return r.json().get("response", "").strip(), selected_model, elapsed
 
 
 def ask_with_fallback(prompt: str, model: str) -> tuple[str, str, float]:
@@ -265,35 +219,21 @@ def ask_with_fallback(prompt: str, model: str) -> tuple[str, str, float]:
 
 def save_chat(role: str, content: str) -> None:
     DATA_DIR.mkdir(exist_ok=True)
-    item = {
-        "time": datetime.now().isoformat(timespec="seconds"),
-        "role": role,
-        "content": content,
-    }
-
+    item = {"time": datetime.now().isoformat(timespec="seconds"), "role": role, "content": content}
     data = []
     if CHAT_FILE.exists():
         try:
-            data = json.loads(CHAT_FILE.read_text(encoding="utf-8"))
+            data = json.loads(CHAT_FILE.read_text())
         except Exception:
             data = []
-
     data.append(item)
-    data = data[-100:]
-    CHAT_FILE.write_text(json.dumps(data, indent=2), encoding="utf-8")
+    CHAT_FILE.write_text(json.dumps(data[-100:], indent=2), encoding="utf-8")
 
 
-def run_cmd(project: str, cmd: list[str], timeout: int = 30) -> str:
+def run_cmd(project: str, cmd: list[str], timeout: int = 60) -> str:
     root = safe_project_path(project)
     try:
-        out = subprocess.check_output(
-            cmd,
-            cwd=root,
-            stderr=subprocess.STDOUT,
-            text=True,
-            timeout=timeout,
-        )
-        return out.strip()
+        return subprocess.check_output(cmd, cwd=root, stderr=subprocess.STDOUT, text=True, timeout=timeout).strip()
     except subprocess.CalledProcessError as e:
         return e.output.strip()
     except Exception as e:
@@ -316,7 +256,7 @@ def home():
 :root{--bg:#0f1117;--panel:#151924;--panel2:#111521;--border:#252b3a;--text:#e6e6e6;--muted:#8d96aa;--blue:#4f7cff;--user:#1f3a5f;--ai:#1d2230}
 *{box-sizing:border-box}
 body{margin:0;font-family:Arial,Helvetica,sans-serif;background:var(--bg);color:var(--text)}
-.layout{display:grid;grid-template-columns:360px 1fr;height:100vh}
+.layout{display:grid;grid-template-columns:370px 1fr;height:100vh}
 .sidebar{background:var(--panel);border-right:1px solid var(--border);padding:18px;overflow:auto}
 .sidebar h2{margin:0 0 8px;color:#8ab4ff}.small{color:var(--muted);font-size:13px}
 .sidebar a{color:#b7c7ff;display:block;margin:10px 0;text-decoration:none}
@@ -354,15 +294,14 @@ button:disabled{background:#3a3f50;cursor:wait}.secondary{background:#2a3040;wid
 <div class="control"><label><input id="projectMode" type="checkbox"> Use project context</label></div>
 
 <div class="control">
-<label>File</label>
-<select id="file"></select>
+<label>File</label><select id="file"></select>
 <div class="grid2">
 <button class="action" onclick="viewFile()">View file</button>
+<button class="action" onclick="previewDiff()">Preview diff</button>
 <button class="action" onclick="saveFile()">Save file</button>
+<button class="action" onclick="fileAction('patch')">Patch idea</button>
 <button class="action" onclick="fileAction('review')">Review</button>
 <button class="action" onclick="fileAction('bugs')">Bugs</button>
-<button class="action" onclick="fileAction('explain')">Explain</button>
-<button class="action" onclick="fileAction('patch')">Patch idea</button>
 </div>
 </div>
 
@@ -371,51 +310,41 @@ button:disabled{background:#3a3f50;cursor:wait}.secondary{background:#2a3040;wid
 <button class="action" onclick="runAction('analyze')">Analyze project</button>
 <button class="action" onclick="runAction('bugs')">Find project bugs</button>
 <button class="action" onclick="runAction('readme')">Generate README text</button>
-<button class="action" onclick="runAction('commit')">AI commit message</button>
 <button class="action" onclick="cacheProject()">Cache project summary</button>
 </div>
 
 <div class="control">
-<label>Git helper</label>
-<button class="action" onclick="gitInfo()">Show Git status</button>
-<button class="action" onclick="gitDiff()">Show Git diff</button>
-<button class="action" onclick="commitFromDiff()">Commit msg from diff</button>
-</div>
-
-<div class="control">
-<label>Run checks</label>
+<label>Git / checks</label>
 <div class="grid2">
-<button class="action" onclick="runCommand('git_status')">git status</button>
+<button class="action" onclick="gitInfo()">git status</button>
+<button class="action" onclick="gitDiff()">git diff</button>
+<button class="action" onclick="commitFromDiff()">commit msg</button>
 <button class="action" onclick="runCommand('python_compile')">compile</button>
 <button class="action" onclick="runCommand('pytest')">pytest</button>
 <button class="action" onclick="runCommand('ruff')">ruff</button>
 </div>
 </div>
 
-<div class="control">
-<label>Search project</label>
-<input id="search" placeholder="Search text...">
-<button class="action" onclick="searchProject()">Search</button>
-</div>
+<div class="control"><label>Search project</label><input id="search" placeholder="Search text..."><button class="action" onclick="searchProject()">Search</button></div>
 
 <button class="secondary" onclick="showDebug()">Show debug</button>
 <button class="secondary" onclick="clearChat()">Clear Memory</button>
-<div class="control small">Backend: Ollama<br>Version: 0.7.0</div>
+<div class="control small">Backend: Ollama<br>Version: 0.8.0</div>
 </aside>
 
 <main class="main">
 <div class="header">
-<div><h2>ForceHub Chat Pro</h2><div class="small">File editor + safe backup + commands + cache</div></div>
+<div><h2>ForceHub Chat Pro</h2><div class="small">Streaming + diff preview + safe save</div></div>
 <div id="state" class="badge">Ready</div>
 </div>
 
 <div id="chat" class="chat">
-<div class="msg ai">Ready. Pick a file, use commands, or ask with project context.</div>
+<div class="msg ai">Ready. Streaming is enabled. Use the editor for safe file changes.</div>
 <textarea id="editor" class="editor" placeholder="File content appears here after View file..."></textarea>
 </div>
 
 <div class="inputbar">
-<textarea id="prompt" placeholder="Type your message... Enter = send, Shift+Enter = newline"></textarea>
+<textarea id="prompt" placeholder="Type your message... Enter = streaming send, Shift+Enter = newline"></textarea>
 <button id="send" onclick="sendMessage()">Send</button>
 </div>
 </main>
@@ -424,33 +353,30 @@ button:disabled{background:#3a3f50;cursor:wait}.secondary{background:#2a3040;wid
 <script>
 const chat=document.getElementById("chat"),promptBox=document.getElementById("prompt"),sendBtn=document.getElementById("send"),state=document.getElementById("state"),modelSelect=document.getElementById("model"),modeSelect=document.getElementById("mode"),projectSelect=document.getElementById("project"),projectMode=document.getElementById("projectMode"),fileSelect=document.getElementById("file"),searchBox=document.getElementById("search"),editor=document.getElementById("editor");
 
-function addMessage(text,cls){const div=document.createElement("div");div.className="msg "+cls;div.textContent=text;chat.appendChild(div);chat.scrollTop=chat.scrollHeight}
+function addMessage(text,cls){const div=document.createElement("div");div.className="msg "+cls;div.textContent=text;chat.appendChild(div);chat.scrollTop=chat.scrollHeight;return div}
 function busy(x){sendBtn.disabled=x;sendBtn.textContent=x?"Thinking":"Send";state.textContent=x?"Working...":"Ready"}
 
 async function loadModels(){try{const res=await fetch("/api/models");const data=await res.json();modelSelect.innerHTML='<option value="auto">auto</option>';for(const m of data.models){const o=document.createElement("option");o.value=m;o.textContent=m;modelSelect.appendChild(o)}}catch{modelSelect.innerHTML='<option value="auto">auto</option><option value="qwen2.5-coder:7b">qwen2.5-coder:7b</option>'}}
 async function loadProjects(){const res=await fetch("/projects");const data=await res.json();projectSelect.innerHTML="";for(const p of data.projects){const o=document.createElement("option");o.value=p;o.textContent=p;projectSelect.appendChild(o)}if(data.projects.includes("forcehub"))projectSelect.value="forcehub";await loadFiles()}
 async function loadFiles(){const res=await fetch("/api/files?project="+encodeURIComponent(projectSelect.value));const data=await res.json();fileSelect.innerHTML="";for(const f of data.files){const o=document.createElement("option");o.value=f;o.textContent=f;fileSelect.appendChild(o)}}
-
 projectSelect.addEventListener("change",loadFiles);
 
 async function sendMessage(){
  const prompt=promptBox.value.trim(); if(!prompt)return;
  addMessage(prompt,"user"); promptBox.value=""; busy(true);
- try{const res=await fetch("/api/chat",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({prompt,model:modelSelect.value,mode:modeSelect.value,project:projectSelect.value,project_mode:projectMode.checked})});const data=await res.json();addMessage(data.text||data.error||"No response",data.error?"ai error":"ai")}catch(e){addMessage("Request error: "+e,"ai error")}finally{busy(false);promptBox.focus()}
+ const aiDiv=addMessage("","ai");
+ try{
+  const res=await fetch("/api/chat-stream",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({prompt,model:modelSelect.value,mode:modeSelect.value,project:projectSelect.value,project_mode:projectMode.checked})});
+  const reader=res.body.getReader(); const decoder=new TextDecoder();
+  while(true){const {done,value}=await reader.read(); if(done)break; aiDiv.textContent+=decoder.decode(value); chat.scrollTop=chat.scrollHeight}
+ }catch(e){aiDiv.textContent="Request error: "+e; aiDiv.className="msg ai error"}finally{busy(false);promptBox.focus()}
 }
 
-async function runAction(action){
- addMessage("Project action: "+action,"user"); busy(true);
- try{const res=await fetch("/api/project-action",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({action,model:modelSelect.value,project:projectSelect.value})});const data=await res.json();addMessage(data.text||data.error||"No response",data.error?"ai error":"ai")}catch(e){addMessage("Request error: "+e,"ai error")}finally{busy(false)}
-}
-
-async function fileAction(action){
- addMessage("File action: "+action+" → "+fileSelect.value,"user"); busy(true);
- try{const res=await fetch("/api/file-action",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({action,model:modelSelect.value,project:projectSelect.value,file:fileSelect.value})});const data=await res.json();addMessage(data.text||data.error||"No response",data.error?"ai error":"ai")}catch(e){addMessage("Request error: "+e,"ai error")}finally{busy(false)}
-}
-
-async function viewFile(){const res=await fetch("/api/file-content?project="+encodeURIComponent(projectSelect.value)+"&file="+encodeURIComponent(fileSelect.value));const data=await res.json();editor.value=data.content||data.text||"";addMessage("Loaded file: "+fileSelect.value,"ai")}
-async function saveFile(){if(!confirm("Save file with .bak backup?"))return;const res=await fetch("/api/save-file",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({project:projectSelect.value,file:fileSelect.value,content:editor.value,backup:true})});const data=await res.json();addMessage(data.text||data.error||"Saved",data.error?"ai error":"ai")}
+async function runAction(action){addMessage("Project action: "+action,"user");busy(true);try{const res=await fetch("/api/project-action",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({action,model:modelSelect.value,project:projectSelect.value})});const data=await res.json();addMessage(data.text||data.error||"No response",data.error?"ai error":"ai")}finally{busy(false)}}
+async function fileAction(action){addMessage("File action: "+action+" → "+fileSelect.value,"user");busy(true);try{const res=await fetch("/api/file-action",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({action,model:modelSelect.value,project:projectSelect.value,file:fileSelect.value})});const data=await res.json();addMessage(data.text||data.error||"No response",data.error?"ai error":"ai")}finally{busy(false)}}
+async function viewFile(){const res=await fetch("/api/file-content?project="+encodeURIComponent(projectSelect.value)+"&file="+encodeURIComponent(fileSelect.value));const data=await res.json();editor.value=data.content||"";addMessage("Loaded file: "+fileSelect.value,"ai")}
+async function previewDiff(){const res=await fetch("/api/diff-content",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({project:projectSelect.value,file:fileSelect.value,content:editor.value})});const data=await res.json();addMessage(data.text||data.error||"No diff",data.error?"ai error":"ai")}
+async function saveFile(){if(!confirm("Save file with timestamped .bak backup?"))return;const res=await fetch("/api/save-file",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({project:projectSelect.value,file:fileSelect.value,content:editor.value,backup:true})});const data=await res.json();addMessage(data.text||data.error||"Saved",data.error?"ai error":"ai")}
 async function gitInfo(){const res=await fetch("/api/git?project="+encodeURIComponent(projectSelect.value));const data=await res.json();addMessage(data.text||JSON.stringify(data,null,2),"ai")}
 async function gitDiff(){const res=await fetch("/api/git-diff?project="+encodeURIComponent(projectSelect.value));const data=await res.json();addMessage(data.text||"No diff","ai")}
 async function commitFromDiff(){busy(true);try{const res=await fetch("/api/commit-from-diff",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({project:projectSelect.value,model:modelSelect.value,action:"commit"})});const data=await res.json();addMessage(data.text||data.error||"No response",data.error?"ai error":"ai")}finally{busy(false)}}
@@ -459,7 +385,6 @@ async function runCommand(command){busy(true);try{const res=await fetch("/api/ru
 async function cacheProject(){busy(true);try{const res=await fetch("/api/cache-project",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({project:projectSelect.value,model:modelSelect.value,action:"analyze"})});const data=await res.json();addMessage(data.text||data.error||"Cached",data.error?"ai error":"ai")}finally{busy(false)}}
 async function showDebug(){const res=await fetch("/api/debug");const data=await res.json();addMessage(JSON.stringify(data,null,2),"ai")}
 async function clearChat(){await fetch("/api/reset",{method:"POST"});chat.innerHTML="";chat.appendChild(editor);editor.value="";addMessage("Memory cleared.","ai")}
-
 promptBox.addEventListener("keydown",e=>{if(e.key==="Enter"&&!e.shiftKey){e.preventDefault();sendMessage()}});
 loadModels();loadProjects();
 </script>
@@ -481,11 +406,7 @@ def list_projects():
 @app.get("/api/files")
 def api_files(project: str = DEFAULT_PROJECT):
     root = safe_project_path(project)
-    files = [
-        str(p.relative_to(root))
-        for p in root.rglob("*")
-        if p.is_file() and should_include_file(p)
-    ]
+    files = [str(p.relative_to(root)) for p in root.rglob("*") if p.is_file() and should_include_file(p)]
     return {"files": sorted(files)[:300]}
 
 
@@ -495,6 +416,19 @@ def api_file_content(project: str, file: str):
     return {"content": target.read_text(encoding="utf-8", errors="replace")}
 
 
+@app.post("/api/diff-content")
+def api_diff_content(req: DiffContentRequest):
+    try:
+        target = safe_file_path(req.project, req.file)
+        old = target.read_text(encoding="utf-8", errors="replace").splitlines(keepends=True)
+        new = req.content.splitlines(keepends=True)
+        diff = difflib.unified_diff(old, new, fromfile=f"a/{req.file}", tofile=f"b/{req.file}")
+        text = "".join(diff)
+        return {"text": text or "No changes."}
+    except Exception as e:
+        return {"error": True, "text": str(e)}
+
+
 @app.post("/api/save-file")
 def api_save_file(req: SaveFileRequest):
     try:
@@ -502,9 +436,8 @@ def api_save_file(req: SaveFileRequest):
         if req.backup:
             backup = target.with_suffix(target.suffix + f".bak-{datetime.now().strftime('%Y%m%d-%H%M%S')}")
             backup.write_text(target.read_text(encoding="utf-8", errors="replace"), encoding="utf-8")
-
         target.write_text(req.content, encoding="utf-8")
-        return {"text": f"Saved {req.file}"}
+        return {"text": f"Saved {req.file} with backup."}
     except Exception as e:
         return {"error": True, "text": str(e)}
 
@@ -521,8 +454,7 @@ def api_git(project: str = DEFAULT_PROJECT):
 def api_git_diff(project: str = DEFAULT_PROJECT):
     diff = run_git(project, ["diff", "--", "."])
     staged = run_git(project, ["diff", "--cached", "--", "."])
-    text = f"UNSTAGED DIFF:\\n{diff or 'none'}\\n\\nSTAGED DIFF:\\n{staged or 'none'}"
-    return {"text": text[:25000]}
+    return {"text": f"UNSTAGED DIFF:\\n{diff or 'none'}\\n\\nSTAGED DIFF:\\n{staged or 'none'}"[:25000]}
 
 
 @app.post("/api/commit-from-diff")
@@ -531,7 +463,6 @@ def api_commit_from_diff(req: ProjectActionRequest):
         diff = run_git(req.project, ["diff", "--", "."])
         staged = run_git(req.project, ["diff", "--cached", "--", "."])
         combined = f"UNSTAGED DIFF:\\n{diff}\\n\\nSTAGED DIFF:\\n{staged}"
-
         if not diff.strip() and not staged.strip():
             return {"text": "No git diff found. Nothing to summarize."}
 
@@ -540,12 +471,10 @@ def api_commit_from_diff(req: ProjectActionRequest):
 Rules:
 - First line: short conventional commit style if suitable.
 - Then 3-5 bullet changelog items.
-- Be specific and practical.
 
 DIFF:
 {combined[:16000]}
 """
-
         answer, used_model, elapsed = ask_with_fallback(prompt, req.model)
         LAST_DEBUG.update({"model": used_model, "elapsed": elapsed, "action": "commit_from_diff"})
         return {"text": answer, "model": used_model}
@@ -558,9 +487,7 @@ def api_models():
     try:
         r = requests.get(OLLAMA_TAGS_URL, timeout=10)
         r.raise_for_status()
-        data = r.json()
-        models = [m["name"] for m in data.get("models", [])]
-        return {"models": models or ["qwen2.5-coder:7b"]}
+        return {"models": [m["name"] for m in r.json().get("models", [])]}
     except Exception:
         return {"models": ["qwen2.5-coder:7b", "qwen2.5-coder:1.5b"]}
 
@@ -582,24 +509,17 @@ def api_search(req: SearchRequest):
         root = safe_project_path(req.project)
         q = req.query.lower()
         results = []
-
         for path in root.rglob("*"):
             if not path.is_file() or not should_include_file(path):
                 continue
-
             rel = str(path.relative_to(root))
-            text = path.read_text(encoding="utf-8", errors="replace")
-            lines = text.splitlines()
-
-            for i, line in enumerate(lines, start=1):
+            for i, line in enumerate(path.read_text(encoding="utf-8", errors="replace").splitlines(), start=1):
                 if q in line.lower():
                     results.append(f"{rel}:{i}: {line.strip()}")
                     if len(results) >= MAX_SEARCH_RESULTS:
                         break
-
             if len(results) >= MAX_SEARCH_RESULTS:
                 break
-
         return {"text": "\\n".join(results) if results else "No results found."}
     except Exception as e:
         return {"error": True, "text": str(e)}
@@ -611,11 +531,11 @@ def api_run_command(req: RunCommandRequest):
         "git_status": ["git", "status", "--short"],
         "pytest": ["python3", "-m", "pytest", "-q"],
         "ruff": ["python3", "-m", "ruff", "check", "."],
+        "ruff_fix": ["python3", "-m", "ruff", "check", ".", "--fix"],
         "python_compile": ["python3", "-m", "compileall", "-q", "."],
     }
-
     try:
-        output = run_cmd(req.project, commands[req.command], timeout=60)
+        output = run_cmd(req.project, commands[req.command], timeout=90)
         return {"text": output or "Command finished with no output."}
     except Exception as e:
         return {"error": True, "text": str(e)}
@@ -626,43 +546,71 @@ def api_chat(req: ChatRequest):
     try:
         prompt = build_prompt(req.prompt, req.mode, req.project, req.project_mode)
         answer, used_model, elapsed = ask_with_fallback(prompt, req.model)
-
         CHAT_HISTORY.append({"role": "user", "content": req.prompt})
         CHAT_HISTORY.append({"role": "assistant", "content": answer})
         del CHAT_HISTORY[:-20]
-
         save_chat("user", req.prompt)
         save_chat("assistant", answer)
-
         LAST_DEBUG.update({"model": used_model, "elapsed": elapsed, "action": "chat"})
         return {"text": answer, "model": used_model, "elapsed": elapsed}
     except Exception as e:
         return {"error": True, "text": str(e)}
 
 
+@app.post("/api/chat-stream")
+def api_chat_stream(req: ChatRequest):
+    def generate():
+        try:
+            prompt = build_prompt(req.prompt, req.mode, req.project, req.project_mode)
+            selected_model = choose_model(req.model, prompt)
+            start = time.time()
+            full = ""
+
+            with requests.post(
+                OLLAMA_GENERATE_URL,
+                json={
+                    "model": selected_model,
+                    "prompt": prompt,
+                    "stream": True,
+                    "options": {"temperature": 0.2, "top_p": 0.9, "num_ctx": 4096},
+                },
+                stream=True,
+                timeout=180,
+            ) as r:
+                r.raise_for_status()
+                for line in r.iter_lines():
+                    if not line:
+                        continue
+                    obj = json.loads(line.decode("utf-8"))
+                    chunk = obj.get("response", "")
+                    full += chunk
+                    yield chunk
+
+            elapsed = round(time.time() - start, 2)
+            CHAT_HISTORY.append({"role": "user", "content": req.prompt})
+            CHAT_HISTORY.append({"role": "assistant", "content": full})
+            del CHAT_HISTORY[:-20]
+            save_chat("user", req.prompt)
+            save_chat("assistant", full)
+            LAST_DEBUG.update({"model": selected_model, "elapsed": elapsed, "action": "chat_stream"})
+
+        except Exception as e:
+            yield f"\\n[stream error] {e}"
+
+    return StreamingResponse(generate(), media_type="text/plain")
+
+
 @app.post("/api/project-action")
 def project_action(req: ProjectActionRequest):
     try:
         context = build_project_context(req.project)
-
         prompts = {
             "analyze": "Analyze this project. Explain what it does and give practical improvements.",
             "bugs": "Find bugs, weak points, security issues, and reliability problems.",
             "readme": "Write a professional GitHub README for this project.",
             "commit": "Generate a clean commit message and short changelog.",
         }
-
-        final_prompt = f"""You are ForceHub AI project reviewer.
-
-Task:
-{prompts[req.action]}
-
-Project context:
-{context}
-
-Answer clearly and practically.
-"""
-
+        final_prompt = f"You are ForceHub AI project reviewer.\\n\\nTask:\\n{prompts[req.action]}\\n\\nProject context:\\n{context}\\n"
         answer, used_model, elapsed = ask_with_fallback(final_prompt, req.model)
         LAST_DEBUG.update({"model": used_model, "elapsed": elapsed, "action": req.action})
         return {"text": answer, "action": req.action, "model": used_model}
@@ -674,25 +622,10 @@ Answer clearly and practically.
 def cache_project(req: ProjectActionRequest):
     try:
         context = build_project_context(req.project)
-        prompt = f"""Create a concise but useful technical summary of this project for future AI context.
-
-Include:
-- purpose
-- main files
-- endpoints/features
-- risks
-- next improvements
-
-PROJECT:
-{context}
-"""
+        prompt = f"Create a concise technical summary of this project for future AI context.\\n\\nPROJECT:\\n{context}"
         answer, used_model, elapsed = ask_with_fallback(prompt, req.model)
         cache = load_cache()
-        cache[req.project] = {
-            "updated": datetime.now().isoformat(timespec="seconds"),
-            "model": used_model,
-            "summary": answer,
-        }
+        cache[req.project] = {"updated": datetime.now().isoformat(timespec="seconds"), "model": used_model, "summary": answer}
         save_cache(cache)
         LAST_DEBUG.update({"model": used_model, "elapsed": elapsed, "action": "cache_project"})
         return {"text": f"Cached project summary.\\n\\n{answer}", "model": used_model}
@@ -706,25 +639,13 @@ def file_action(req: FileReviewRequest):
         root = safe_project_path(req.project)
         file_path = safe_file_path(req.project, req.file)
         content = read_file_safe(file_path, root)
-
         prompts = {
             "review": "Review this file. Give practical improvements only.",
             "bugs": "Find likely bugs, security issues, and weak design choices in this file.",
             "explain": "Explain what this file does clearly.",
             "patch": "Suggest a safe patch. Do not apply it. Show replacement code blocks only.",
         }
-
-        final_prompt = f"""You are ForceHub AI file reviewer.
-
-Task:
-{prompts[req.action]}
-
-File content:
-{content}
-
-Answer clearly and practically.
-"""
-
+        final_prompt = f"You are ForceHub AI file reviewer.\\n\\nTask:\\n{prompts[req.action]}\\n\\nFile content:\\n{content}\\n"
         answer, used_model, elapsed = ask_with_fallback(final_prompt, req.model)
         LAST_DEBUG.update({"model": used_model, "elapsed": elapsed, "action": f"file_{req.action}"})
         return {"text": answer, "file": req.file, "action": req.action, "model": used_model}
