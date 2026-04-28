@@ -37,6 +37,15 @@ app = FastAPI(title="ForceHub", description="Local AI dev dashboard.", version=A
 CHAT_HISTORY: list[dict[str, str]] = []
 LAST_DEBUG: dict[str, str | int | float] = {}
 
+AGENT_STATE = {
+    "running": False,
+    "step": "idle",
+    "logs": [],
+    "project": "",
+    "model": "",
+}
+AGENT_THREAD = None
+
 
 class StatusResponse(BaseModel):
     status: str
@@ -520,10 +529,20 @@ button:disabled{background:#3a3f50;cursor:wait}.secondary{background:#2a3040;wid
 
 <div id="chat" class="chat">
 <div class="msg ai">Ready. Streaming is enabled. Use the editor for safe file changes.</div>
-<textarea id="editor" class="editor" placeholder="File content appears here after View file..."></textarea>
 </div>
 
 
+<div id="editor-panel" style="display:none;border-top:1px solid var(--border);background:#0b0d12;flex-shrink:0">
+  <div style="display:flex;justify-content:space-between;align-items:center;padding:5px 14px;border-bottom:1px solid var(--border)">
+    <span id="editor-filename" style="font-size:12px;color:var(--muted);font-family:Consolas,monospace">No file loaded</span>
+    <div style="display:flex;gap:6px">
+      <button onclick="saveFromMonaco()" style="font-size:11px;padding:3px 10px;border-radius:6px;border:0;background:#26385f;color:#fff;cursor:pointer">Save</button>
+      <button onclick="diffFromMonaco()" style="font-size:11px;padding:3px 10px;border-radius:6px;border:0;background:#2a3040;color:#fff;cursor:pointer">Diff</button>
+      <button onclick="document.getElementById('editor-panel').style.display='none'" style="font-size:14px;padding:2px 8px;border-radius:6px;border:0;background:none;color:var(--muted);cursor:pointer">&#x2715;</button>
+    </div>
+  </div>
+  <div id="monaco-container" style="height:320px"></div>
+</div>
 <div id="agent-panel" style="display:none;background:#0b0d12;padding:10px 16px;border-top:1px solid #252b3a">
   <div class="small">Agent Log <button onclick="document.getElementById('agent-panel').style.display='none'">x</button></div>
   <pre id="agent-log" style="max-height:220px;overflow:auto;white-space:pre-wrap"></pre>
@@ -537,7 +556,7 @@ button:disabled{background:#3a3f50;cursor:wait}.secondary{background:#2a3040;wid
 </div>
 
 <script>
-const chat=document.getElementById("chat"),promptBox=document.getElementById("prompt"),sendBtn=document.getElementById("send"),state=document.getElementById("state"),modelSelect=document.getElementById("model"),modeSelect=document.getElementById("mode"),projectSelect=document.getElementById("project"),projectMode=document.getElementById("projectMode"),fileSelect=document.getElementById("file"),searchBox=document.getElementById("search"),editor=document.getElementById("editor");
+const chat=document.getElementById("chat"),promptBox=document.getElementById("prompt"),sendBtn=document.getElementById("send"),state=document.getElementById("state"),modelSelect=document.getElementById("model"),modeSelect=document.getElementById("mode"),projectSelect=document.getElementById("project"),projectMode=document.getElementById("projectMode"),fileSelect=document.getElementById("file"),searchBox=document.getElementById("search");
 
 function addMessage(text,cls){const div=document.createElement("div");div.className="msg "+cls;div.textContent=text;chat.appendChild(div);chat.scrollTop=chat.scrollHeight;return div}
 function busy(x){sendBtn.disabled=x;sendBtn.textContent=x?"Thinking":"Send";state.textContent=x?"Working...":"Ready"}
@@ -560,9 +579,30 @@ async function sendMessage(){
 
 async function runAction(action){addMessage("Project action: "+action,"user");busy(true);try{const res=await fetch("/api/project-action",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({action,model:modelSelect.value,project:projectSelect.value})});const data=await res.json();addMessage(data.text||data.error||"No response",data.error?"ai error":"ai")}finally{busy(false)}}
 async function fileAction(action){addMessage("File action: "+action+" → "+fileSelect.value,"user");busy(true);try{const res=await fetch("/api/file-action",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({action,model:modelSelect.value,project:projectSelect.value,file:fileSelect.value})});const data=await res.json();addMessage(data.text||data.error||"No response",data.error?"ai error":"ai")}finally{busy(false)}}
-async function viewFile(){const res=await fetch("/api/file-content?project="+encodeURIComponent(projectSelect.value)+"&file="+encodeURIComponent(fileSelect.value));const data=await res.json();editor.value=data.content||"";addMessage("Loaded file: "+fileSelect.value,"ai")}
-async function previewDiff(){const res=await fetch("/api/diff-content",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({project:projectSelect.value,file:fileSelect.value,content:editor.value})});const data=await res.json();addMessage(data.text||data.error||"No diff",data.error?"ai error":"ai")}
-async function saveFile(){if(!confirm("Save file with timestamped .bak backup?"))return;const res=await fetch("/api/save-file",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({project:projectSelect.value,file:fileSelect.value,content:editor.value,backup:true})});const data=await res.json();addMessage(data.text||data.error||"Saved",data.error?"ai error":"ai")}
+async function viewFile(){
+  const fname=fileSelect.value;
+  const res=await fetch("/api/file-content?project="+encodeURIComponent(projectSelect.value)+"&file="+encodeURIComponent(fname));
+  const data=await res.json();
+  setEditorContent(data.content||"", fname);
+  document.getElementById("editor-panel").style.display="block";
+  document.getElementById("editor-filename").textContent=fname;
+  addMessage("Loaded: "+fname,"ai");
+}
+async function previewDiff(){
+  const content=monacoEditor?monacoEditor.getValue():"";
+  const res=await fetch("/api/diff-content",{method:"POST",headers:{"Content-Type":"application/json"},
+    body:JSON.stringify({project:projectSelect.value,file:fileSelect.value,content})});
+  const data=await res.json();
+  addMessage(data.text||data.error||"No diff",data.error?"ai error":"ai");
+}
+async function saveFile(){
+  if(!confirm("Save file with timestamped .bak backup?"))return;
+  const content=monacoEditor?monacoEditor.getValue():"";
+  const res=await fetch("/api/save-file",{method:"POST",headers:{"Content-Type":"application/json"},
+    body:JSON.stringify({project:projectSelect.value,file:fileSelect.value,content,backup:true})});
+  const data=await res.json();
+  addMessage(data.text||data.error||"Saved",data.error?"ai error":"ai");
+}
 async function gitInfo(){const res=await fetch("/api/git?project="+encodeURIComponent(projectSelect.value));const data=await res.json();addMessage(data.text||JSON.stringify(data,null,2),"ai")}
 async function gitDiff(){const res=await fetch("/api/git-diff?project="+encodeURIComponent(projectSelect.value));const data=await res.json();addMessage(data.text||"No diff","ai")}
 async function commitFromDiff(){busy(true);try{const res=await fetch("/api/commit-from-diff",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({project:projectSelect.value,model:modelSelect.value,action:"commit"})});const data=await res.json();addMessage(data.text||data.error||"No response",data.error?"ai error":"ai")}finally{busy(false)}}
@@ -570,7 +610,13 @@ async function searchProject(){const q=searchBox.value.trim();if(!q)return;const
 async function runCommand(command){busy(true);try{const res=await fetch("/api/run-command",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({project:projectSelect.value,command})});const data=await res.json();lastOutput = data.text || data.error || "No output"; addMessage(lastOutput,data.error?"ai error":"ai")}finally{busy(false)}}
 async function cacheProject(){busy(true);try{const res=await fetch("/api/cache-project",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({project:projectSelect.value,model:modelSelect.value,action:"analyze"})});const data=await res.json();addMessage(data.text||data.error||"Cached",data.error?"ai error":"ai")}finally{busy(false)}}
 async function showDebug(){const res=await fetch("/api/debug");const data=await res.json();addMessage(JSON.stringify(data,null,2),"ai")}
-async function clearChat(){await fetch("/api/reset",{method:"POST"});chat.innerHTML="";chat.appendChild(editor);editor.value="";addMessage("Memory cleared.","ai")}
+async function clearChat(){
+  await fetch("/api/reset",{method:"POST"});
+  chat.innerHTML="";
+  if(monacoEditor) monacoEditor.setValue("");
+  document.getElementById("editor-filename").textContent="No file loaded";
+  addMessage("Memory cleared.","ai");
+}
 
 let lastOutput = "";
 
@@ -703,6 +749,70 @@ setInterval(async ()=>{
 }, 2000);
 </script>
 
+<script src="https://cdn.jsdelivr.net/npm/monaco-editor@0.44.0/min/vs/loader.js"></script>
+<script>
+let monacoEditor = null;
+
+require.config({ paths: { vs: "https://cdn.jsdelivr.net/npm/monaco-editor@0.44.0/min/vs" } });
+require(["vs/editor/editor.main"], function () {
+  monacoEditor = monaco.editor.create(document.getElementById("monaco-container"), {
+    value: "",
+    language: "python",
+    theme: "vs-dark",
+    automaticLayout: true,
+    minimap: { enabled: false },
+    fontSize: 13,
+    scrollBeyondLastLine: false,
+    wordWrap: "off",
+    renderLineHighlight: "line",
+    lineNumbers: "on",
+    folding: true,
+    readOnly: false,
+  });
+});
+
+function setEditorContent(content, filename) {
+  if (!monacoEditor) { setTimeout(() => setEditorContent(content, filename), 200); return; }
+  monacoEditor.setValue(content || "");
+  monacoEditor.setScrollPosition({ scrollTop: 0 });
+  const ext = (filename || "").split(".").pop().toLowerCase();
+  const langMap = {
+    py:"python", js:"javascript", ts:"typescript", tsx:"typescript",
+    json:"json", md:"markdown", html:"html", css:"css",
+    cpp:"cpp", cc:"cpp", cxx:"cpp", h:"cpp", hpp:"cpp",
+    c:"c", sh:"shell", bash:"shell", yaml:"yaml", yml:"yaml",
+    toml:"ini", txt:"plaintext",
+  };
+  monaco.editor.setModelLanguage(monacoEditor.getModel(), langMap[ext] || "plaintext");
+}
+
+async function saveFromMonaco() {
+  if (!monacoEditor) return;
+  if (!confirm("Save file with timestamped .bak backup?")) return;
+  const fname = document.getElementById("editor-filename").textContent;
+  if (!fname || fname === "No file loaded") { addMessage("No file loaded in editor.", "ai error"); return; }
+  const content = monacoEditor.getValue();
+  const res = await fetch("/api/save-file", {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ project: projectSelect.value, file: fname, content, backup: true })
+  });
+  const data = await res.json();
+  addMessage(data.text || data.error || "Saved", data.error ? "ai error" : "ai");
+}
+
+async function diffFromMonaco() {
+  if (!monacoEditor) return;
+  const fname = document.getElementById("editor-filename").textContent;
+  if (!fname || fname === "No file loaded") { addMessage("No file loaded in editor.", "ai error"); return; }
+  const content = monacoEditor.getValue();
+  const res = await fetch("/api/diff-content", {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ project: projectSelect.value, file: fname, content })
+  });
+  const data = await res.json();
+  addMessage(data.text || data.error || "No diff", data.error ? "ai error" : "ai");
+}
+</script>
 </body>
 </html>
 """
