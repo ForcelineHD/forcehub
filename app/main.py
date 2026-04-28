@@ -3,6 +3,7 @@ import base64
 import os
 import json
 import subprocess
+import threading
 import time
 from datetime import datetime
 from pathlib import Path
@@ -639,6 +640,63 @@ async function saveProjectSettings(){
 promptBox.addEventListener("keydown",e=>{if(e.key==="Enter"&&!e.shiftKey){e.preventDefault();sendMessage()}});
 loadModels();loadProjects();
 </script>
+
+<script>
+async function startAgent(){
+  const goal = prompt("Agent goal:", "Analyze project, find issues, and suggest fixes.");
+  const project = (window.projectSelect && projectSelect.value) || "forcehub";
+  const model = (window.modelSelect && modelSelect.value) || "auto";
+
+  const r = await fetch("/api/agent/start?project=" + encodeURIComponent(project) + "&model=" + encodeURIComponent(model), {
+    method: "POST"
+  });
+  const j = await r.json();
+  appendAgentMeta(j.status || j.text || JSON.stringify(j));
+  await refreshAgent();
+}
+
+async function stopAgent(){
+  const r = await fetch("/api/agent/stop", { method: "POST" });
+  const j = await r.json();
+  appendAgentMeta(j.text || JSON.stringify(j));
+  await refreshAgent();
+}
+
+async function refreshAgent(){
+  const r = await fetch("/api/agent/status");
+  const j = await r.json();
+
+  const meta = "running=" + j.running + " | step=" + j.step + " | project=" + j.project + " | model=" + j.model;
+  document.getElementById("agent-meta").textContent = meta;
+
+  const log = (j.logs || []).join("\n");
+  const el = document.getElementById("agent-log");
+  el.textContent = log;
+  el.scrollTop = el.scrollHeight;
+}
+
+function appendAgentMeta(t){
+  const el = document.getElementById("agent-meta");
+  el.textContent = (el.textContent ? el.textContent + " | " : "") + t;
+}
+
+// auto refresh every 2s while running
+setInterval(async ()=>{
+  try{
+    const r = await fetch("/api/agent/status");
+    const j = await r.json();
+    if(j.running){
+      const log = (j.logs || []).join("\n");
+      const el = document.getElementById("agent-log");
+      el.textContent = log;
+      el.scrollTop = el.scrollHeight;
+      document.getElementById("agent-meta").textContent =
+        "running=" + j.running + " | step=" + j.step + " | project=" + j.project + " | model=" + j.model;
+    }
+  }catch(e){}
+}, 2000);
+</script>
+
 </body>
 </html>
 """
@@ -1056,6 +1114,85 @@ def api_save_project_settings(req: ProjectSettingsRequest):
         return {"text": f"Saved settings for {req.project}"}
     except Exception as e:
         return {"error": True, "text": str(e)}
+
+
+
+def agent_log(msg: str):
+    AGENT_STATE["logs"].append(msg)
+    AGENT_STATE["logs"] = AGENT_STATE["logs"][-200:]
+
+
+def run_agent(project: str, model: str):
+    AGENT_STATE["running"] = True
+    AGENT_STATE["project"] = project
+    AGENT_STATE["model"] = model
+
+    try:
+        agent_log(f"[START] {project}")
+
+        context = build_project_context(project)
+
+        AGENT_STATE["step"] = "analyze"
+        res, used_model, t = ask_with_fallback(
+            f"Analyze this project:\n{context}",
+            model
+        )
+        agent_log("[ANALYSIS]\n" + res[:300])
+
+        AGENT_STATE["step"] = "bugs"
+        bugs, _, _ = ask_with_fallback(
+            f"Find bugs:\n{res}",
+            model
+        )
+        agent_log("[BUGS]\n" + bugs[:300])
+
+        AGENT_STATE["step"] = "fix"
+        fixes, _, _ = ask_with_fallback(
+            f"Fix these bugs:\n{bugs}",
+            model
+        )
+        agent_log("[FIXES]\n" + fixes[:300])
+
+        AGENT_STATE["step"] = "done"
+        agent_log("[DONE]")
+
+    except Exception as e:
+        agent_log("[ERROR] " + str(e))
+
+    AGENT_STATE["running"] = False
+
+
+@app.post("/api/agent/start")
+def agent_start(project: str = DEFAULT_PROJECT, model: str = "auto"):
+    global AGENT_THREAD
+
+    if AGENT_STATE["running"]:
+        return {"error": "already running"}
+
+    AGENT_THREAD = threading.Thread(
+        target=run_agent,
+        args=(project, model),
+        daemon=True
+    )
+    AGENT_THREAD.start()
+
+    return {"status": "started"}
+
+
+
+@app.post("/api/agent/stop")
+def agent_stop():
+    if not AGENT_STATE["running"]:
+        return {"text": "not running"}
+    AGENT_STATE["running"] = False
+    AGENT_STATE["step"] = "stopped"
+    AGENT_STATE["logs"].append("[STOP] requested")
+    return {"text": "stop requested"}
+
+
+@app.get("/api/agent/status")
+def agent_status():
+    return AGENT_STATE
 
 
 @app.post("/ask")
