@@ -523,6 +523,12 @@ button:disabled{background:#3a3f50;cursor:wait}.secondary{background:#2a3040;wid
 <textarea id="editor" class="editor" placeholder="File content appears here after View file..."></textarea>
 </div>
 
+
+<div id="agent-panel" style="display:none;background:#0b0d12;padding:10px 16px;border-top:1px solid #252b3a">
+  <div class="small">Agent Log <button onclick="document.getElementById('agent-panel').style.display='none'">x</button></div>
+  <pre id="agent-log" style="max-height:220px;overflow:auto;white-space:pre-wrap"></pre>
+</div>
+
 <div class="inputbar">
 <textarea id="prompt" placeholder="Type your message... Enter = streaming send, Shift+Enter = newline"></textarea>
 <button id="send" onclick="sendMessage()">Send</button>
@@ -857,7 +863,7 @@ def api_run_command(req: RunCommandRequest):
         "clang_tidy": [
             "bash",
             "-lc",
-            "command -v clang-tidy >/dev/null 2>&1 || { echo 'clang-tidy not installed. Run: sudo apt install clang-tidy'; exit 0; }; files=$(find . -type f \( -name '*.cpp' -o -name '*.cc' -o -name '*.cxx' \) | head -20); if [ -z \"$files\" ]; then echo No C++ source files found.; else clang-tidy $files -- -std=c++20; fi",
+            "command -v clang-tidy >/dev/null 2>&1 || { echo 'clang-tidy not installed. Run: sudo apt install clang-tidy'; exit 0; }; files=$(find . -type f \\( -name '*.cpp' -o -name '*.cc' -o -name '*.cxx' \\) | head -20); if [ -z \"$files\" ]; then echo No C++ source files found.; else clang-tidy $files -- -std=c++20; fi",
         ],
         "bandit": [
             "bash",
