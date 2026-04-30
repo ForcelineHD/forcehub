@@ -1238,77 +1238,156 @@ def agent_log(msg: str):
     AGENT_STATE["logs"] = AGENT_STATE["logs"][-200:]
 
 
+class AgentManager:
+    """Thread-safe agent state. Single active agent for local use."""
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._state = {
+            "running": False,
+            "step": "idle",
+            "logs": [],
+            "project": "",
+            "model": "",
+        }
+
+    def status(self) -> dict:
+        with self._lock:
+            return {**self._state, "logs": list(self._state["logs"])}
+
+    def log(self, msg: str) -> None:
+        with self._lock:
+            self._state["logs"].append(msg)
+            self._state["logs"] = self._state["logs"][-200:]
+
+    def set_step(self, step: str) -> None:
+        with self._lock:
+            self._state["step"] = step
+
+    def is_running(self) -> bool:
+        with self._lock:
+            return self._state["running"]
+
+    def start_state(self, project: str, model: str) -> bool:
+        with self._lock:
+            if self._state["running"]:
+                return False
+            self._state.update({
+                "running": True,
+                "step": "starting",
+                "logs": [],
+                "project": project,
+                "model": model,
+            })
+            return True
+
+    def finish(self) -> None:
+        with self._lock:
+            self._state["running"] = False
+
+    def stop(self) -> bool:
+        with self._lock:
+            if not self._state["running"]:
+                return False
+            self._state["running"] = False
+            self._state["step"] = "stopped"
+            self._state["logs"].append("[STOP] requested")
+            return True
+
+
+AGENT = AgentManager()
+
+
 def run_agent(project: str, model: str):
-    AGENT_STATE["running"] = True
-    AGENT_STATE["project"] = project
-    AGENT_STATE["model"] = model
+    """Worker function — called inside AgentManager._run_wrapper."""
 
-    try:
-        agent_log(f"[START] {project}")
+    AGENT.log(f"[START] {project}")
 
-        context = build_project_context(project)
+    context = build_project_context(project)
 
-        AGENT_STATE["step"] = "analyze"
-        res, used_model, t = ask_with_fallback(
-            f"Analyze this project:\n{context}",
-            model
-        )
-        agent_log("[ANALYSIS]\n" + res[:300])
+    AGENT.set_step("analyze")
+    if not AGENT.is_running():
+        return
 
-        AGENT_STATE["step"] = "bugs"
-        bugs, _, _ = ask_with_fallback(
-            f"Find bugs:\n{res}",
-            model
-        )
-        agent_log("[BUGS]\n" + bugs[:300])
+    analyze_prompt = f"""You are ForceHub AI, a code analysis assistant.
 
-        AGENT_STATE["step"] = "fix"
-        fixes, _, _ = ask_with_fallback(
-            f"Fix these bugs:\n{bugs}",
-            model
-        )
-        agent_log("[FIXES]\n" + fixes[:300])
+Analyze the following software project and give a plain-text summary:
+- What the project does
+- Key files and their roles
+- Tech stack and dependencies
+- Overall code quality
 
-        AGENT_STATE["step"] = "done"
-        agent_log("[DONE]")
+Be concise. No JSON. No markdown fences. Plain text only.
 
-    except Exception as e:
-        agent_log("[ERROR] " + str(e))
+PROJECT:
+{context[:6000]}
+"""
+    res, used_model, _ = ask_with_fallback(analyze_prompt, model)
+    AGENT.log(f"[ANALYSIS] (model={used_model})\n" + res[:400])
 
-    AGENT_STATE["running"] = False
+    AGENT.set_step("bugs")
+    if not AGENT.is_running():
+        return
 
+    bugs_prompt = f"""You are ForceHub AI, a code review assistant.
+
+Based on this project analysis, list the most likely bugs, security issues,
+and reliability problems. Be specific. No JSON. Plain text only.
+
+PROJECT SUMMARY:
+{res[:2000]}
+
+FULL PROJECT CONTEXT:
+{context[:3000]}
+"""
+    bugs, _, _ = ask_with_fallback(bugs_prompt, model)
+    AGENT.log("[BUGS]\n" + bugs[:400])
+
+    AGENT.set_step("fix")
+    if not AGENT.is_running():
+        return
+
+    fixes_prompt = f"""You are ForceHub AI, a coding assistant.
+
+For each bug listed below, suggest a specific fix with the exact code change needed.
+No JSON. Plain text only. Use --- to separate each fix.
+
+BUGS FOUND:
+{bugs[:2000]}
+"""
+    fixes, _, _ = ask_with_fallback(fixes_prompt, model)
+    AGENT.log("[FIXES]\n" + fixes[:400])
+
+    AGENT.set_step("done")
+    AGENT.log("[DONE] Agent completed successfully.")
 
 @app.post("/api/agent/start")
 def agent_start(project: str = DEFAULT_PROJECT, model: str = "auto"):
-    global AGENT_THREAD
-
-    if AGENT_STATE["running"]:
+    if not AGENT.start_state(project, model):
         return {"error": "already running"}
 
-    AGENT_THREAD = threading.Thread(
-        target=run_agent,
-        args=(project, model),
-        daemon=True
-    )
-    AGENT_THREAD.start()
+    def worker():
+        try:
+            run_agent(project, model)
+        except Exception as e:
+            AGENT.log("[ERROR] " + str(e))
+        finally:
+            AGENT.finish()
 
+    threading.Thread(target=worker, daemon=True).start()
     return {"status": "started"}
-
 
 
 @app.post("/api/agent/stop")
 def agent_stop():
-    if not AGENT_STATE["running"]:
+    if not AGENT.stop():
         return {"text": "not running"}
-    AGENT_STATE["running"] = False
-    AGENT_STATE["step"] = "stopped"
-    AGENT_STATE["logs"].append("[STOP] requested")
     return {"text": "stop requested"}
 
 
 @app.get("/api/agent/status")
 def agent_status():
-    return AGENT_STATE
+    return AGENT.status()
 
 
 @app.post("/ask")
