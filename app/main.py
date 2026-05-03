@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Literal
 
 import requests
+from fastapi.staticfiles import StaticFiles
 from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse, PlainTextResponse, StreamingResponse
 from pydantic import BaseModel
@@ -33,6 +34,7 @@ MAX_PROJECT_FILES = 15
 MAX_SEARCH_RESULTS = 80
 
 app = FastAPI(title="ForceHub", description="Local AI dev dashboard.", version=APP_VERSION)
+app.mount("/static", StaticFiles(directory="static"), name="static")
 
 CHAT_HISTORY: list[dict[str, str]] = []
 LAST_DEBUG: dict[str, str | int | float] = {}
@@ -813,6 +815,7 @@ async function diffFromMonaco() {
   addMessage(data.text || data.error || "No diff", data.error ? "ai error" : "ai");
 }
 </script>
+<script src="/static/js/forcehub.js"></script>
 </body>
 </html>
 """
@@ -1320,7 +1323,7 @@ Analyze the following software project and give a plain-text summary:
 Be concise. No JSON. No markdown fences. Plain text only.
 
 PROJECT:
-{context[:6000]}
+{context[:2500]}
 """
     res, used_model, _ = ask_with_fallback(analyze_prompt, model)
     AGENT.log(f"[ANALYSIS] (model={used_model})\n" + res[:400])
@@ -1335,10 +1338,10 @@ Based on this project analysis, list the most likely bugs, security issues,
 and reliability problems. Be specific. No JSON. Plain text only.
 
 PROJECT SUMMARY:
-{res[:2000]}
+{res[:1000]}
 
 FULL PROJECT CONTEXT:
-{context[:3000]}
+{context[:1500]}
 """
     bugs, _, _ = ask_with_fallback(bugs_prompt, model)
     AGENT.log("[BUGS]\n" + bugs[:400])
@@ -1353,7 +1356,7 @@ For each bug listed below, suggest a specific fix with the exact code change nee
 No JSON. Plain text only. Use --- to separate each fix.
 
 BUGS FOUND:
-{bugs[:2000]}
+{bugs[:1000]}
 """
     fixes, _, _ = ask_with_fallback(fixes_prompt, model)
     AGENT.log("[FIXES]\n" + fixes[:400])
