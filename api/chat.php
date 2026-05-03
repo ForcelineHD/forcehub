@@ -5,7 +5,7 @@ $raw = file_get_contents('php://input');
 $body = json_decode($raw ?: '{}', true);
 
 $prompt = trim($body['prompt'] ?? '');
-$model = $body['model'] ?? 'qwen2.5-coder:1.5b';
+$model = 'qwen2.5-coder:1.5b';
 
 if ($prompt === '') {
     json_response(['error' => 'missing prompt'], 400);
@@ -23,7 +23,7 @@ curl_setopt_array($ch, [
     CURLOPT_POST => true,
     CURLOPT_HTTPHEADER => ['Content-Type: application/json'],
     CURLOPT_POSTFIELDS => $payload,
-    CURLOPT_TIMEOUT => 180,
+    CURLOPT_TIMEOUT => 60,
 ]);
 
 $res = curl_exec($ch);
