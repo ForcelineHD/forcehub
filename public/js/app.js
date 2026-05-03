@@ -1,5 +1,5 @@
 async function apiGet(url) {
-  const res = await fetch(url, { credentials: "include" });
+  const res = await fetch(url);
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
   return await res.json();
 }
@@ -7,7 +7,6 @@ async function apiGet(url) {
 async function apiPost(url, body) {
   const res = await fetch(url, {
     method: "POST",
-    credentials: "include",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body)
   });
@@ -16,15 +15,13 @@ async function apiPost(url, body) {
 }
 
 function escapeHtml(s) {
-  return String(s).replace(/[&<>"']/g, function (c) {
-    return {
-      "&": "&amp;",
-      "<": "&lt;",
-      ">": "&gt;",
-      '"': "&quot;",
-      "'": "&#039;"
-    }[c];
-  });
+  return String(s).replace(/[&<>"']/g, c => ({
+    "&": "&amp;",
+    "<": "&lt;",
+    ">": "&gt;",
+    '"': "&quot;",
+    "'": "&#039;"
+  }[c]));
 }
 
 function jsArg(s) {
@@ -35,7 +32,7 @@ async function loadModels() {
   const out = document.getElementById("modelsOutput");
   out.textContent = "Loading...";
   try {
-    const data = await apiGet("/api/models.php");
+    const data = await apiGet("/api/models");
     out.textContent = JSON.stringify(data, null, 2);
   } catch (e) {
     out.textContent = e.message;
@@ -47,7 +44,7 @@ async function loadFiles(path = ".") {
   out.textContent = "Loading...";
 
   try {
-    const data = await apiGet("/api/files.php?path=" + encodeURIComponent(path));
+    const data = await apiGet("/api/files?path=" + encodeURIComponent(path));
 
     if (data.type === "file") {
       out.innerHTML =
@@ -87,9 +84,10 @@ async function sendChat() {
 
   out.textContent = "Thinking...";
   try {
-    const data = await apiPost("/api/chat.php", {
-      prompt: prompt,
-      model: "qwen2.5-coder:1.5b"
+    const data = await apiPost("/api/chat", {
+      model: "qwen2.5-coder:1.5b",
+      prompt: "You are ForceHub, a local AI coding assistant. Only answer about this project, code, files, Linux, Git, C++, PHP, JavaScript, FastAPI, Ollama, and development tasks. If the question asks about public facts, companies, news, countries, products, or anything requiring internet knowledge, say: 'I am a local coding assistant and I should not answer that without web search.'\\n\\nUser request:\\n" + prompt,
+      stream: false
     });
     out.textContent = data.response || JSON.stringify(data, null, 2);
   } catch (e) {
@@ -97,10 +95,8 @@ async function sendChat() {
   }
 }
 
-document.addEventListener("DOMContentLoaded", function () {
+document.addEventListener("DOMContentLoaded", () => {
   document.getElementById("loadModels").addEventListener("click", loadModels);
-  document.getElementById("loadFiles").addEventListener("click", function () {
-    loadFiles(".");
-  });
+  document.getElementById("loadFiles").addEventListener("click", () => loadFiles("."));
   document.getElementById("sendChat").addEventListener("click", sendChat);
 });
