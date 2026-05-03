@@ -8,3 +8,7 @@ data/
 # C++ build artifacts
 cpp-forcehub/build/
 cpp-forcehub/external/Crow/
+
+# C++ build artifacts
+cpp-forcehub/build/
+cpp-forcehub/external/Crow/
