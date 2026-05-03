@@ -4,3 +4,7 @@ __pycache__/
 __pycache__/
 *.pyc
 data/
+
+# C++ build artifacts
+cpp-forcehub/build/
+cpp-forcehub/external/Crow/
