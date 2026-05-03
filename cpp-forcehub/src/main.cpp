@@ -16,6 +16,11 @@ std::string read_file(const fs::path& path) {
 int main() {
     crow::SimpleApp app;
 
+
+    CROW_ROUTE(app, "/")([] {
+        return crow::response(200, "ForceHub C++ is running");
+    });
+
     CROW_ROUTE(app, "/api/health")([] {
         return crow::response(200, R"({"status":"ok","service":"forcehub-cpp"})");
     });
