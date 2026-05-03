@@ -1,0 +1,11 @@
+body {
+  font-family: system-ui, Arial, sans-serif;
+  background: #0f1117;
+  color: #e5e7eb;
+  padding: 24px;
+}
+
+pre {
+  background: #151925;
+  padding: 12px;
+}
