@@ -47,3 +47,14 @@ document.getElementById("sendChat").onclick = async () => {
     out.textContent = e.message;
   }
 };
+
+document.getElementById("loadFiles").onclick = async () => {
+  const out = document.getElementById("filesOutput");
+  out.textContent = "Loading...";
+  try {
+    const data = await apiGet("/api/files.php?path=.");
+    out.textContent = JSON.stringify(data, null, 2);
+  } catch (e) {
+    out.textContent = e.message;
+  }
+};
