@@ -12,3 +12,10 @@ cpp-forcehub/external/Crow/
 # C++ build artifacts
 cpp-forcehub/build/
 cpp-forcehub/external/Crow/
+
+# Local patch/backups
+app/*.bak
+app/main.py.*-bak-*
+clean_agent_manager.py
+fix_agent_manager_full.py
+forcehub_agent_prompts.py
