@@ -1,5 +1,8 @@
 .venv/
+.deps/
 __pycache__/
 *.pyc
+server.out
+server.err
 __pycache__/
 *.pyc

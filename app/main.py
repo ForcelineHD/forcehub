@@ -1,8 +1,11 @@
-import difflib
 import base64
-import os
+import difflib
+import importlib.util
 import json
+import os
+import shutil
 import subprocess
+import sys
 import time
 from datetime import datetime
 from pathlib import Path
@@ -16,12 +19,14 @@ from pydantic import BaseModel
 APP_NAME = "forcehub"
 APP_VERSION = "0.8.0"
 
-PROJECTS_DIR = Path("/home/flozi/projects")
-DEFAULT_PROJECT = "forcehub"
-DATA_DIR = Path("/home/flozi/projects/forcehub/data")
+BASE_DIR = Path(__file__).resolve().parent.parent
+PROJECTS_DIR = Path(os.getenv("FORCEHUB_PROJECTS_DIR", str(BASE_DIR.parent))).expanduser().resolve()
+DEFAULT_PROJECT = os.getenv("FORCEHUB_DEFAULT_PROJECT", BASE_DIR.name)
+DATA_DIR = Path(os.getenv("FORCEHUB_DATA_DIR", str(BASE_DIR / "data"))).expanduser().resolve()
 CHAT_FILE = DATA_DIR / "chats.json"
 PROJECT_CACHE_FILE = DATA_DIR / "project_cache.json"
 PROJECT_SETTINGS_FILE = DATA_DIR / "project_settings.json"
+FORCEHUB_USERNAME = os.getenv("FORCEHUB_USERNAME") or os.getenv("USER") or os.getenv("USERNAME") or "forcehub"
 FORCEHUB_PASSWORD = os.getenv("FORCEHUB_PASSWORD", "forcehub")
 
 OLLAMA_GENERATE_URL = "http://127.0.0.1:11434/api/generate"
@@ -30,6 +35,8 @@ OLLAMA_TAGS_URL = "http://127.0.0.1:11434/api/tags"
 MAX_FILE_CHARS = 8000
 MAX_PROJECT_FILES = 15
 MAX_SEARCH_RESULTS = 80
+CPP_SOURCE_PATTERNS = ("*.cpp", "*.cc", "*.cxx")
+CPP_HEADER_PATTERNS = ("*.h", "*.hh", "*.hpp", "*.hxx")
 
 app = FastAPI(title="ForceHub", description="Local AI dev dashboard.", version=APP_VERSION)
 
@@ -111,6 +118,58 @@ class ProjectSettingsRequest(BaseModel):
     project_context: bool = False
 
 
+def ensure_dir(path: Path) -> None:
+    path.mkdir(parents=True, exist_ok=True)
+
+
+def is_relative_to(path: Path, other: Path) -> bool:
+    try:
+        path.relative_to(other)
+        return True
+    except ValueError:
+        return False
+
+
+def list_project_names() -> list[str]:
+    ensure_dir(PROJECTS_DIR)
+    projects = [p.name for p in PROJECTS_DIR.iterdir() if p.is_dir()]
+    return sorted(projects)
+
+
+def find_files(root: Path, patterns: tuple[str, ...]) -> list[Path]:
+    found: list[Path] = []
+    seen: set[Path] = set()
+    for pattern in patterns:
+        for path in root.rglob(pattern):
+            if not path.is_file():
+                continue
+            resolved = path.resolve()
+            if resolved in seen:
+                continue
+            seen.add(resolved)
+            found.append(path)
+    return sorted(found, key=lambda path: str(path.relative_to(root)))
+
+
+def resolve_executable(*names: str) -> str | None:
+    for name in names:
+        path = shutil.which(name)
+        if path:
+            return path
+    return None
+
+
+def python_module_available(module_name: str) -> bool:
+    return importlib.util.find_spec(module_name) is not None
+
+
+def get_git_command() -> str | None:
+    configured = os.getenv("FORCEHUB_GIT_BIN")
+    if configured:
+        return configured
+    return resolve_executable("git")
+
+
 
 def is_auth_disabled() -> bool:
     return FORCEHUB_PASSWORD.strip() == ""
@@ -127,7 +186,7 @@ def check_basic_auth(request: Request) -> bool:
     try:
         decoded = base64.b64decode(auth.split(" ", 1)[1]).decode("utf-8")
         username, password = decoded.split(":", 1)
-        return username == "flozi" and password == FORCEHUB_PASSWORD
+        return username == FORCEHUB_USERNAME and password == FORCEHUB_PASSWORD
     except Exception:
         return False
 
@@ -148,7 +207,7 @@ async def forcehub_basic_auth(request: Request, call_next):
 
 
 def load_project_settings() -> dict:
-    DATA_DIR.mkdir(exist_ok=True)
+    ensure_dir(DATA_DIR)
     if not PROJECT_SETTINGS_FILE.exists():
         return {}
     try:
@@ -158,24 +217,28 @@ def load_project_settings() -> dict:
 
 
 def save_project_settings(data: dict) -> None:
-    DATA_DIR.mkdir(exist_ok=True)
+    ensure_dir(DATA_DIR)
     PROJECT_SETTINGS_FILE.write_text(json.dumps(data, indent=2), encoding="utf-8")
 
 
 def safe_project_path(project: str) -> Path:
-    base = PROJECTS_DIR.resolve()
-    target = (PROJECTS_DIR / project).resolve()
-    if not str(target).startswith(str(base)):
+    ensure_dir(PROJECTS_DIR)
+    normalized_project = project.strip()
+    if not normalized_project:
+        raise ValueError("Project name is required")
+
+    target = (PROJECTS_DIR / normalized_project).resolve()
+    if not is_relative_to(target, PROJECTS_DIR):
         raise ValueError("Invalid project path")
     if not target.exists() or not target.is_dir():
-        raise ValueError(f"Project not found: {project}")
+        raise ValueError(f"Project not found: {normalized_project}")
     return target
 
 
 def safe_file_path(project: str, file: str) -> Path:
     root = safe_project_path(project)
     target = (root / file).resolve()
-    if not str(target).startswith(str(root.resolve())):
+    if not is_relative_to(target, root.resolve()):
         raise ValueError("Invalid file path")
     if not target.exists() or not target.is_file():
         raise ValueError(f"File not found: {file}")
@@ -217,7 +280,7 @@ def build_project_context(project: str) -> str:
 
 
 def load_cache() -> dict:
-    DATA_DIR.mkdir(exist_ok=True)
+    ensure_dir(DATA_DIR)
     if not PROJECT_CACHE_FILE.exists():
         return {}
     try:
@@ -227,7 +290,7 @@ def load_cache() -> dict:
 
 
 def save_cache(data: dict) -> None:
-    DATA_DIR.mkdir(exist_ok=True)
+    ensure_dir(DATA_DIR)
     PROJECT_CACHE_FILE.write_text(json.dumps(data, indent=2), encoding="utf-8")
 
 
@@ -294,12 +357,12 @@ def ask_with_fallback(prompt: str, model: str) -> tuple[str, str, float]:
 
 
 def save_chat(role: str, content: str) -> None:
-    DATA_DIR.mkdir(exist_ok=True)
+    ensure_dir(DATA_DIR)
     item = {"time": datetime.now().isoformat(timespec="seconds"), "role": role, "content": content}
     data = []
     if CHAT_FILE.exists():
         try:
-            data = json.loads(CHAT_FILE.read_text())
+            data = json.loads(CHAT_FILE.read_text(encoding="utf-8"))
         except Exception:
             data = []
     data.append(item)
@@ -309,7 +372,8 @@ def save_chat(role: str, content: str) -> None:
 def run_cmd(project: str, cmd: list[str], timeout: int = 60) -> str:
     root = safe_project_path(project)
     try:
-        return subprocess.check_output(cmd, cwd=root, stderr=subprocess.STDOUT, text=True, timeout=timeout).strip()
+        command = [str(part) for part in cmd]
+        return subprocess.check_output(command, cwd=root, stderr=subprocess.STDOUT, text=True, timeout=timeout).strip()
     except subprocess.CalledProcessError as e:
         return e.output.strip()
     except Exception as e:
@@ -317,13 +381,16 @@ def run_cmd(project: str, cmd: list[str], timeout: int = 60) -> str:
 
 
 def run_git(project: str, args: list[str]) -> str:
-    return run_cmd(project, ["git", *args], timeout=20)
+    git_bin = get_git_command()
+    if not git_bin:
+        return "git is not installed or not on PATH."
+    return run_cmd(project, [git_bin, *args], timeout=20)
 
 
 
 def command_exists(project: str, command: str) -> bool:
-    out = run_cmd(project, ["bash", "-lc", f"command -v {command} >/dev/null 2>&1 && echo yes || echo no"], timeout=10)
-    return out.strip() == "yes"
+    del project
+    return resolve_executable(command) is not None
 
 
 def detect_project_type(project: str) -> dict:
@@ -331,7 +398,7 @@ def detect_project_type(project: str) -> dict:
 
     files = {p.name for p in root.iterdir() if p.is_file()}
     has_py = any(root.rglob("*.py"))
-    has_cpp = any(root.rglob(pattern) for pattern in ("*.cpp", "*.cc", "*.cxx", "*.hpp", "*.h"))
+    has_cpp = bool(find_files(root, CPP_SOURCE_PATTERNS + CPP_HEADER_PATTERNS))
     has_node = "package.json" in files
 
     detected = []
@@ -347,9 +414,9 @@ def detect_project_type(project: str) -> dict:
         "python": {
             "pyproject": "pyproject.toml" in files,
             "requirements": "requirements.txt" in files,
-            "pytest": command_exists(project, "pytest"),
-            "ruff": command_exists(project, "ruff"),
-            "bandit": command_exists(project, "bandit"),
+            "pytest": python_module_available("pytest"),
+            "ruff": python_module_available("ruff"),
+            "bandit": python_module_available("bandit"),
         },
         "cpp": {
             "cmake": "CMakeLists.txt" in files,
@@ -395,9 +462,9 @@ def project_health(project: str) -> str:
     detected = detect_project_type(project)
     lines.append("")
     lines.append("Detected:")
-    lines.append(str(detected))
+    lines.append(json.dumps(detected, indent=2))
 
-    return "\\n".join(lines)
+    return "\n".join(lines)
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -536,9 +603,9 @@ function addMessage(text,cls){const div=document.createElement("div");div.classN
 function busy(x){sendBtn.disabled=x;sendBtn.textContent=x?"Thinking":"Send";state.textContent=x?"Working...":"Ready"}
 
 async function loadModels(){try{const res=await fetch("/api/models");const data=await res.json();modelSelect.innerHTML='<option value="auto">auto</option>';for(const m of data.models){const o=document.createElement("option");o.value=m;o.textContent=m;modelSelect.appendChild(o)}}catch{modelSelect.innerHTML='<option value="auto">auto</option><option value="qwen2.5-coder:7b">qwen2.5-coder:7b</option>'}}
-async function loadProjects(){const res=await fetch("/projects");const data=await res.json();projectSelect.innerHTML="";for(const p of data.projects){const o=document.createElement("option");o.value=p;o.textContent=p;projectSelect.appendChild(o)}if(data.projects.includes("forcehub"))projectSelect.value="forcehub";await loadFiles(); await loadProjectSettings()}
-async function loadFiles(){const res=await fetch("/api/files?project="+encodeURIComponent(projectSelect.value));const data=await res.json();fileSelect.innerHTML="";for(const f of data.files){const o=document.createElement("option");o.value=f;o.textContent=f;fileSelect.appendChild(o)}}
-projectSelect.addEventListener("change",loadFiles);
+async function loadProjects(){const res=await fetch("/projects");const data=await res.json();projectSelect.innerHTML="";for(const p of data.projects){const o=document.createElement("option");o.value=p;o.textContent=p;projectSelect.appendChild(o)}const fallback=data.default_project&&data.projects.includes(data.default_project)?data.default_project:data.projects[0];if(fallback)projectSelect.value=fallback;await loadFiles();if(fallback)await loadProjectSettings()}
+async function loadFiles(){if(!projectSelect.value){fileSelect.innerHTML="";return}const res=await fetch("/api/files?project="+encodeURIComponent(projectSelect.value));const data=await res.json();fileSelect.innerHTML="";for(const f of data.files){const o=document.createElement("option");o.value=f;o.textContent=f;fileSelect.appendChild(o)}}
+projectSelect.addEventListener("change",async()=>{await loadFiles();await loadProjectSettings()});
 
 async function sendMessage(){
  const prompt=promptBox.value.trim(); if(!prompt)return;
@@ -651,7 +718,7 @@ def status():
 
 @app.get("/projects")
 def list_projects():
-    return {"projects": sorted([p.name for p in PROJECTS_DIR.iterdir() if p.is_dir()])}
+    return {"projects": list_project_names(), "default_project": DEFAULT_PROJECT}
 
 
 @app.get("/api/files")
@@ -698,14 +765,14 @@ def api_git(project: str = DEFAULT_PROJECT):
     status = run_git(project, ["status", "--short"])
     branch = run_git(project, ["branch", "--show-current"])
     log = run_git(project, ["log", "--oneline", "-5"])
-    return {"text": f"Branch: {branch}\\n\\nStatus:\\n{status or 'clean'}\\n\\nLast commits:\\n{log}"}
+    return {"text": f"Branch: {branch}\n\nStatus:\n{status or 'clean'}\n\nLast commits:\n{log}"}
 
 
 @app.get("/api/git-diff")
 def api_git_diff(project: str = DEFAULT_PROJECT):
     diff = run_git(project, ["diff", "--", "."])
     staged = run_git(project, ["diff", "--cached", "--", "."])
-    return {"text": f"UNSTAGED DIFF:\\n{diff or 'none'}\\n\\nSTAGED DIFF:\\n{staged or 'none'}"[:25000]}
+    return {"text": f"UNSTAGED DIFF:\n{diff or 'none'}\n\nSTAGED DIFF:\n{staged or 'none'}"[:25000]}
 
 
 @app.post("/api/commit-from-diff")
@@ -713,7 +780,7 @@ def api_commit_from_diff(req: ProjectActionRequest):
     try:
         diff = run_git(req.project, ["diff", "--", "."])
         staged = run_git(req.project, ["diff", "--cached", "--", "."])
-        combined = f"UNSTAGED DIFF:\\n{diff}\\n\\nSTAGED DIFF:\\n{staged}"
+        combined = f"UNSTAGED DIFF:\n{diff}\n\nSTAGED DIFF:\n{staged}"
         if not diff.strip() and not staged.strip():
             return {"text": "No git diff found. Nothing to summarize."}
 
@@ -771,63 +838,138 @@ def api_search(req: SearchRequest):
                         break
             if len(results) >= MAX_SEARCH_RESULTS:
                 break
-        return {"text": "\\n".join(results) if results else "No results found."}
+        return {"text": "\n".join(results) if results else "No results found."}
     except Exception as e:
         return {"error": True, "text": str(e)}
+
+
+def run_python_module(project: str, module: str, *args: str, timeout: int = 90) -> str:
+    return run_cmd(project, [sys.executable, "-m", module, *args], timeout=timeout)
+
+
+def run_cpp_compile(project: str) -> str:
+    root = safe_project_path(project)
+    files = find_files(root, CPP_SOURCE_PATTERNS)
+    if not files:
+        return "No C++ source files found."
+
+    compiler = resolve_executable("g++", "clang++", "cl")
+    if not compiler:
+        return "No C++ compiler found on PATH."
+
+    relative_files = [str(path.relative_to(root)) for path in files]
+    if Path(compiler).name.lower() == "cl.exe":
+        return run_cmd(project, [compiler, "/std:c++20", "/W4", "/EHsc", "/Zs", *relative_files], timeout=90)
+
+    return run_cmd(
+        project,
+        [compiler, "-std=c++20", "-Wall", "-Wextra", "-pedantic", "-fsyntax-only", *relative_files],
+        timeout=90,
+    )
+
+
+def run_cmake_configure(project: str) -> str:
+    root = safe_project_path(project)
+    if not (root / "CMakeLists.txt").exists():
+        return "CMakeLists.txt not found."
+
+    cmake = resolve_executable("cmake")
+    if not cmake:
+        return "cmake is not installed or not on PATH."
+
+    return run_cmd(project, [cmake, "-S", ".", "-B", "build"], timeout=120)
+
+
+def run_cmake_build(project: str) -> str:
+    root = safe_project_path(project)
+    if not (root / "build").exists():
+        return "build directory not found. Run cmake configure first."
+
+    cmake = resolve_executable("cmake")
+    if not cmake:
+        return "cmake is not installed or not on PATH."
+
+    jobs = str(os.cpu_count() or 1)
+    return run_cmd(project, [cmake, "--build", "build", "--parallel", jobs], timeout=180)
+
+
+def run_cppcheck(project: str) -> str:
+    root = safe_project_path(project)
+    if not find_files(root, CPP_SOURCE_PATTERNS + CPP_HEADER_PATTERNS):
+        return "No C++ files found."
+
+    cppcheck = resolve_executable("cppcheck")
+    if not cppcheck:
+        return "cppcheck is not installed or not on PATH."
+
+    return run_cmd(
+        project,
+        [
+            cppcheck,
+            "--enable=warning,performance,portability,style",
+            "--std=c++20",
+            "--suppress=missingIncludeSystem",
+            ".",
+        ],
+        timeout=180,
+    )
+
+
+def run_clang_tidy(project: str) -> str:
+    root = safe_project_path(project)
+    files = find_files(root, CPP_SOURCE_PATTERNS)[:20]
+    if not files:
+        return "No C++ source files found."
+
+    clang_tidy = resolve_executable("clang-tidy")
+    if not clang_tidy:
+        return "clang-tidy is not installed or not on PATH."
+
+    relative_files = [str(path.relative_to(root)) for path in files]
+    return run_cmd(project, [clang_tidy, *relative_files, "--", "-std=c++20"], timeout=180)
+
+
+def run_bandit(project: str) -> str:
+    if not python_module_available("bandit"):
+        return "bandit is not installed. Run: pip install bandit"
+    return run_python_module(project, "bandit", "-r", ".", "-x", ".venv,venv,__pycache__,data", timeout=180)
+
+
+def run_npm(project: str, *args: str) -> str:
+    root = safe_project_path(project)
+    if not (root / "package.json").exists():
+        return "package.json not found."
+
+    npm = resolve_executable("npm", "npm.cmd")
+    if not npm:
+        return "npm is not installed or not on PATH."
+
+    return run_cmd(project, [npm, *args], timeout=180)
 
 
 @app.post("/api/run-command")
 def api_run_command(req: RunCommandRequest):
     commands = {
-        "git_status": ["git", "status", "--short"],
-        "pytest": ["python3", "-m", "pytest", "-q"],
-        "ruff": ["python3", "-m", "ruff", "check", "."],
-        "ruff_fix": ["python3", "-m", "ruff", "check", ".", "--fix"],
-        "python_compile": ["python3", "-m", "compileall", "-q", "."],
-        "cpp_compile": [
-            "bash",
-            "-lc",
-            "shopt -s nullglob globstar; files=(**/*.cpp **/*.cc **/*.cxx); if [ ${#files[@]} -eq 0 ]; then echo No C++ source files found.; else g++ -std=c++20 -Wall -Wextra -pedantic -fsyntax-only ${files[@]}; fi",
-        ],
-        "cmake_configure": ["bash", "-lc", "cmake -S . -B build"],
-        "cmake_build": ["bash", "-lc", "cmake --build build -j$(nproc)"],
-        "cppcheck": [
-            "bash",
-            "-lc",
-            "command -v cppcheck >/dev/null 2>&1 || { echo 'cppcheck not installed. Run: sudo apt install cppcheck'; exit 0; }; cppcheck --enable=warning,performance,portability,style --std=c++20 --suppress=missingIncludeSystem .",
-        ],
-        "clang_tidy": [
-            "bash",
-            "-lc",
-            "command -v clang-tidy >/dev/null 2>&1 || { echo 'clang-tidy not installed. Run: sudo apt install clang-tidy'; exit 0; }; files=$(find . -type f \( -name '*.cpp' -o -name '*.cc' -o -name '*.cxx' \) | head -20); if [ -z \"$files\" ]; then echo No C++ source files found.; else clang-tidy $files -- -std=c++20; fi",
-        ],
-        "bandit": [
-            "bash",
-            "-lc",
-            "command -v bandit >/dev/null 2>&1 || { echo 'bandit not installed. Run: pip install bandit'; exit 0; }; bandit -r . -x .venv,venv,__pycache__,data",
-        ],
-        "npm_test": [
-            "bash",
-            "-lc",
-            "if [ ! -f package.json ]; then echo package.json not found.; elif ! command -v npm >/dev/null 2>&1; then echo npm not installed.; else npm test; fi",
-        ],
-        "npm_build": [
-            "bash",
-            "-lc",
-            "if [ ! -f package.json ]; then echo package.json not found.; elif ! command -v npm >/dev/null 2>&1; then echo npm not installed.; else npm run build; fi",
-        ],
-        "npm_audit": [
-            "bash",
-            "-lc",
-            "if [ ! -f package.json ]; then echo package.json not found.; elif ! command -v npm >/dev/null 2>&1; then echo npm not installed.; else npm audit; fi",
-        ],
-        "health": ["bash", "-lc", "echo health"],
+        "git_status": lambda project: run_git(project, ["status", "--short"]),
+        "pytest": lambda project: run_python_module(project, "pytest", "-q"),
+        "ruff": lambda project: run_python_module(project, "ruff", "check", "."),
+        "ruff_fix": lambda project: run_python_module(project, "ruff", "check", ".", "--fix"),
+        "python_compile": lambda project: run_python_module(project, "compileall", "-q", "."),
+        "cpp_compile": run_cpp_compile,
+        "cmake_configure": run_cmake_configure,
+        "cmake_build": run_cmake_build,
+        "cppcheck": run_cppcheck,
+        "clang_tidy": run_clang_tidy,
+        "bandit": run_bandit,
+        "npm_test": lambda project: run_npm(project, "test"),
+        "npm_build": lambda project: run_npm(project, "run", "build"),
+        "npm_audit": lambda project: run_npm(project, "audit"),
     }
     try:
         if req.command == "health":
             return {"text": project_health(req.project)}
 
-        output = run_cmd(req.project, commands[req.command], timeout=90)
+        output = commands[req.command](req.project)
         return {"text": output or "Command finished with no output."}
     except Exception as e:
         return {"error": True, "text": str(e)}
@@ -887,7 +1029,7 @@ def api_chat_stream(req: ChatRequest):
             LAST_DEBUG.update({"model": selected_model, "elapsed": elapsed, "action": "chat_stream"})
 
         except Exception as e:
-            yield f"\\n[stream error] {e}"
+            yield f"\n[stream error] {e}"
 
     return StreamingResponse(generate(), media_type="text/plain")
 
@@ -902,7 +1044,7 @@ def project_action(req: ProjectActionRequest):
             "readme": "Write a professional GitHub README for this project.",
             "commit": "Generate a clean commit message and short changelog.",
         }
-        final_prompt = f"You are ForceHub AI project reviewer.\\n\\nTask:\\n{prompts[req.action]}\\n\\nProject context:\\n{context}\\n"
+        final_prompt = f"You are ForceHub AI project reviewer.\n\nTask:\n{prompts[req.action]}\n\nProject context:\n{context}\n"
         answer, used_model, elapsed = ask_with_fallback(final_prompt, req.model)
         LAST_DEBUG.update({"model": used_model, "elapsed": elapsed, "action": req.action})
         return {"text": answer, "action": req.action, "model": used_model}
@@ -914,13 +1056,13 @@ def project_action(req: ProjectActionRequest):
 def cache_project(req: ProjectActionRequest):
     try:
         context = build_project_context(req.project)
-        prompt = f"Create a concise technical summary of this project for future AI context.\\n\\nPROJECT:\\n{context}"
+        prompt = f"Create a concise technical summary of this project for future AI context.\n\nPROJECT:\n{context}"
         answer, used_model, elapsed = ask_with_fallback(prompt, req.model)
         cache = load_cache()
         cache[req.project] = {"updated": datetime.now().isoformat(timespec="seconds"), "model": used_model, "summary": answer}
         save_cache(cache)
         LAST_DEBUG.update({"model": used_model, "elapsed": elapsed, "action": "cache_project"})
-        return {"text": f"Cached project summary.\\n\\n{answer}", "model": used_model}
+        return {"text": f"Cached project summary.\n\n{answer}", "model": used_model}
     except Exception as e:
         return {"error": True, "text": str(e)}
 
@@ -937,7 +1079,7 @@ def file_action(req: FileReviewRequest):
             "explain": "Explain what this file does clearly.",
             "patch": "Suggest a safe patch. Do not apply it. Show replacement code blocks only.",
         }
-        final_prompt = f"You are ForceHub AI file reviewer.\\n\\nTask:\\n{prompts[req.action]}\\n\\nFile content:\\n{content}\\n"
+        final_prompt = f"You are ForceHub AI file reviewer.\n\nTask:\n{prompts[req.action]}\n\nFile content:\n{content}\n"
         answer, used_model, elapsed = ask_with_fallback(final_prompt, req.model)
         LAST_DEBUG.update({"model": used_model, "elapsed": elapsed, "action": f"file_{req.action}"})
         return {"text": answer, "file": req.file, "action": req.action, "model": used_model}
@@ -990,7 +1132,7 @@ Rules:
 @app.post("/api/create-cpp-project")
 def api_create_cpp_project(req: CreateCppProjectRequest):
     try:
-        if "/" in req.project or ".." in req.project or not req.project.strip():
+        if any(sep in req.project for sep in ("/", "\\")) or ".." in req.project or not req.project.strip():
             raise ValueError("Invalid project name")
 
         root = PROJECTS_DIR / req.project
@@ -1001,27 +1143,44 @@ def api_create_cpp_project(req: CreateCppProjectRequest):
         (root / "include").mkdir()
 
         (root / "src" / "main.cpp").write_text(
-            '#include <iostream>\\n\\nint main() {\\n    std::cout << "Hello from C++20!\\\\n";\\n    return 0;\\n}\\n',
+            '#include <iostream>\n\nint main() {\n    std::cout << "Hello from C++20!\\n";\n    return 0;\n}\n',
             encoding="utf-8",
         )
 
         (root / "CMakeLists.txt").write_text(
-            'cmake_minimum_required(VERSION 3.20)\\n'
-            f'project({req.project} LANGUAGES CXX)\\n\\n'
-            'set(CMAKE_CXX_STANDARD 20)\\n'
-            'set(CMAKE_CXX_STANDARD_REQUIRED ON)\\n'
-            'set(CMAKE_CXX_EXTENSIONS OFF)\\n\\n'
-            'add_executable(${PROJECT_NAME} src/main.cpp)\\n'
-            'target_compile_options(${PROJECT_NAME} PRIVATE -Wall -Wextra -pedantic)\\n',
+            "cmake_minimum_required(VERSION 3.20)\n"
+            f"project({req.project} LANGUAGES CXX)\n\n"
+            "set(CMAKE_CXX_STANDARD 20)\n"
+            "set(CMAKE_CXX_STANDARD_REQUIRED ON)\n"
+            "set(CMAKE_CXX_EXTENSIONS OFF)\n\n"
+            "add_executable(${PROJECT_NAME} src/main.cpp)\n"
+            "target_compile_options(${PROJECT_NAME} PRIVATE\n"
+            "  $<$<CXX_COMPILER_ID:MSVC>:/W4 /permissive->\n"
+            "  $<$<NOT:$<CXX_COMPILER_ID:MSVC>>:-Wall -Wextra -pedantic>\n"
+            ")\n",
             encoding="utf-8",
         )
 
-        (root / ".gitignore").write_text("build/\\n*.o\\n*.exe\\n*.out\\n.cache/\\n", encoding="utf-8")
-        (root / "README.md").write_text(f"# {req.project}\\n\\nC++20 CMake project.\\n", encoding="utf-8")
+        (root / ".gitignore").write_text("build/\n*.o\n*.exe\n*.out\n.cache/\n", encoding="utf-8")
+        (root / "README.md").write_text(f"# {req.project}\n\nC++20 CMake project.\n", encoding="utf-8")
 
-        subprocess.check_output(["git", "init"], cwd=root, text=True, stderr=subprocess.STDOUT)
+        git_bin = get_git_command()
+        git_message = ""
+        if git_bin:
+            subprocess.check_output([git_bin, "init"], cwd=root, text=True, stderr=subprocess.STDOUT)
+        else:
+            git_message = "\n\nGit was not initialized because git is not installed or not on PATH."
 
-        return {"text": f"Created C++ project: {root}\\n\\nNext:\\ncd {root}\\ncmake -S . -B build\\ncmake --build build\\n./build/{req.project}"}
+        return {
+            "text": (
+                f"Created C++ project: {root}\n\n"
+                "Next:\n"
+                f"cd {root}\n"
+                "cmake -S . -B build\n"
+                "cmake --build build"
+                f"{git_message}"
+            )
+        }
     except Exception as e:
         return {"error": True, "text": str(e)}
 
@@ -1061,3 +1220,15 @@ def api_save_project_settings(req: ProjectSettingsRequest):
 @app.post("/ask")
 def ask_legacy(req: ChatRequest):
     return api_chat(req)
+
+
+def main() -> None:
+    import uvicorn
+
+    host = os.getenv("FORCEHUB_HOST", "127.0.0.1")
+    port = int(os.getenv("FORCEHUB_PORT", "8000"))
+    uvicorn.run("app.main:app", host=host, port=port, reload=False)
+
+
+if __name__ == "__main__":
+    main()
