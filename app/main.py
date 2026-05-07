@@ -2,17 +2,21 @@ import base64
 import difflib
 import importlib.util
 import json
+import logging
 import os
+import secrets
 import shutil
 import subprocess
 import sys
 import time
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Literal
 
 import requests
 from fastapi import FastAPI, Request
+from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import HTMLResponse, PlainTextResponse, StreamingResponse
 from pydantic import BaseModel
 
@@ -26,8 +30,9 @@ DATA_DIR = Path(os.getenv("FORCEHUB_DATA_DIR", str(BASE_DIR / "data"))).expandus
 CHAT_FILE = DATA_DIR / "chats.json"
 PROJECT_CACHE_FILE = DATA_DIR / "project_cache.json"
 PROJECT_SETTINGS_FILE = DATA_DIR / "project_settings.json"
-FORCEHUB_USERNAME = os.getenv("FORCEHUB_USERNAME") or os.getenv("USER") or os.getenv("USERNAME") or "forcehub"
-FORCEHUB_PASSWORD = os.getenv("FORCEHUB_PASSWORD", "forcehub")
+FORCEHUB_USERNAME = os.getenv("FORCEHUB_USERNAME", "").strip()
+FORCEHUB_PASSWORD = os.getenv("FORCEHUB_PASSWORD", "")
+FORCEHUB_AUTH_DISABLED = os.getenv("FORCEHUB_AUTH_DISABLED", "").strip().lower() in {"1", "true", "yes", "on"}
 
 OLLAMA_GENERATE_URL = "http://127.0.0.1:11434/api/generate"
 OLLAMA_TAGS_URL = "http://127.0.0.1:11434/api/tags"
@@ -39,9 +44,19 @@ CPP_SOURCE_PATTERNS = ("*.cpp", "*.cc", "*.cxx")
 CPP_HEADER_PATTERNS = ("*.h", "*.hh", "*.hpp", "*.hxx")
 
 app = FastAPI(title="ForceHub", description="Local AI dev dashboard.", version=APP_VERSION)
+logger = logging.getLogger(APP_NAME)
 
 CHAT_HISTORY: list[dict[str, str]] = []
 LAST_DEBUG: dict[str, str | int | float] = {}
+
+
+@dataclass(frozen=True)
+class AuthResult:
+    ok: bool
+    message: str = ""
+
+    def __bool__(self) -> bool:
+        return self.ok
 
 
 class StatusResponse(BaseModel):
@@ -130,9 +145,44 @@ def is_relative_to(path: Path, other: Path) -> bool:
         return False
 
 
+def normalize_project_name(project: str) -> str:
+    normalized = project.strip()
+    if not normalized:
+        raise ValueError("Project name is required")
+
+    path = Path(normalized)
+    if path.is_absolute() or path.drive or len(path.parts) != 1 or normalized in {".", ".."}:
+        raise ValueError("Invalid project name: use a direct project directory name")
+
+    return normalized
+
+
+def normalize_file_path(file: str) -> Path:
+    normalized = file.strip()
+    if not normalized:
+        raise ValueError("File path is required")
+
+    path = Path(normalized)
+    if path.is_absolute() or path.drive or any(part in {".", ".."} for part in path.parts):
+        raise ValueError("Invalid file path: use a project-relative file path")
+
+    return path
+
+
 def list_project_names() -> list[str]:
     ensure_dir(PROJECTS_DIR)
-    projects = [p.name for p in PROJECTS_DIR.iterdir() if p.is_dir()]
+    projects = []
+    for path in PROJECTS_DIR.iterdir():
+        if not path.is_dir():
+            continue
+        try:
+            normalized = normalize_project_name(path.name)
+            resolved = path.resolve()
+        except (OSError, ValueError) as exc:
+            logger.warning("Skipping invalid project directory %s: %s", path, exc)
+            continue
+        if is_relative_to(resolved, PROJECTS_DIR):
+            projects.append(normalized)
     return sorted(projects)
 
 
@@ -172,23 +222,45 @@ def get_git_command() -> str | None:
 
 
 def is_auth_disabled() -> bool:
-    return FORCEHUB_PASSWORD.strip() == ""
+    return FORCEHUB_AUTH_DISABLED
 
 
-def check_basic_auth(request: Request) -> bool:
+def check_basic_auth(request: Request) -> AuthResult:
     if is_auth_disabled():
-        return True
+        return AuthResult(True)
+
+    if not FORCEHUB_USERNAME or not FORCEHUB_PASSWORD:
+        message = (
+            "ForceHub authentication is not configured. Set FORCEHUB_USERNAME and "
+            "FORCEHUB_PASSWORD, or set FORCEHUB_AUTH_DISABLED=1 for local-only use."
+        )
+        logger.error(message)
+        return AuthResult(False, message)
 
     auth = request.headers.get("authorization", "")
-    if not auth.startswith("Basic "):
-        return False
+    scheme, _, token = auth.partition(" ")
+    if scheme.lower() != "basic" or not token.strip():
+        return AuthResult(False, "ForceHub authentication required")
 
     try:
-        decoded = base64.b64decode(auth.split(" ", 1)[1]).decode("utf-8")
-        username, password = decoded.split(":", 1)
-        return username == FORCEHUB_USERNAME and password == FORCEHUB_PASSWORD
-    except Exception:
-        return False
+        decoded = base64.b64decode(token, validate=True).decode("utf-8")
+        username, separator, password = decoded.partition(":")
+        if not separator:
+            return AuthResult(False, "Invalid Basic auth payload")
+        if not username:
+            return AuthResult(False, "Basic auth username is required")
+        if not password:
+            return AuthResult(False, "Basic auth password is required")
+
+        username_matches = secrets.compare_digest(username, FORCEHUB_USERNAME)
+        password_matches = secrets.compare_digest(password, FORCEHUB_PASSWORD)
+        if username_matches and password_matches:
+            return AuthResult(True)
+
+        return AuthResult(False, "Invalid ForceHub username or password")
+    except Exception as exc:
+        logger.warning("Rejected malformed Basic auth header: %s", exc)
+        return AuthResult(False, "Invalid Basic auth header")
 
 
 @app.middleware("http")
@@ -196,9 +268,10 @@ async def forcehub_basic_auth(request: Request, call_next):
     if request.url.path.startswith("/status"):
         return await call_next(request)
 
-    if not check_basic_auth(request):
+    auth_result = check_basic_auth(request)
+    if not auth_result:
         return PlainTextResponse(
-            "ForceHub authentication required",
+            auth_result.message or "ForceHub authentication required",
             status_code=401,
             headers={"WWW-Authenticate": 'Basic realm="ForceHub"'},
         )
@@ -211,25 +284,43 @@ def load_project_settings() -> dict:
     if not PROJECT_SETTINGS_FILE.exists():
         return {}
     try:
-        return json.loads(PROJECT_SETTINGS_FILE.read_text(encoding="utf-8"))
-    except Exception:
+        data = json.loads(PROJECT_SETTINGS_FILE.read_text(encoding="utf-8"))
+        if isinstance(data, dict):
+            return data
+        logger.error("Project settings file must contain a JSON object: %s", PROJECT_SETTINGS_FILE)
+        return {}
+    except json.JSONDecodeError as exc:
+        logger.error("Invalid JSON in project settings file %s: %s", PROJECT_SETTINGS_FILE, exc)
+        return {}
+    except OSError:
+        logger.exception("Failed to read project settings file %s", PROJECT_SETTINGS_FILE)
         return {}
 
 
 def save_project_settings(data: dict) -> None:
-    ensure_dir(DATA_DIR)
-    PROJECT_SETTINGS_FILE.write_text(json.dumps(data, indent=2), encoding="utf-8")
+    try:
+        ensure_dir(DATA_DIR)
+        PROJECT_SETTINGS_FILE.write_text(json.dumps(data, indent=2), encoding="utf-8")
+    except OSError as exc:
+        logger.exception("Failed to save project settings file %s", PROJECT_SETTINGS_FILE)
+        raise RuntimeError(f"Unable to save project settings: {PROJECT_SETTINGS_FILE}") from exc
+
+
+def api_error(action: str, exc: Exception) -> dict[str, bool | str]:
+    logger.exception("%s failed", action)
+    return {"error": True, "text": f"{action} failed: {exc}"}
 
 
 def safe_project_path(project: str) -> Path:
     ensure_dir(PROJECTS_DIR)
-    normalized_project = project.strip()
-    if not normalized_project:
-        raise ValueError("Project name is required")
+    normalized_project = normalize_project_name(project)
+    allowed_projects = set(list_project_names())
+    if normalized_project not in allowed_projects:
+        raise ValueError(f"Project is not allowed or does not exist: {normalized_project}")
 
     target = (PROJECTS_DIR / normalized_project).resolve()
     if not is_relative_to(target, PROJECTS_DIR):
-        raise ValueError("Invalid project path")
+        raise ValueError("Invalid project path: resolved outside the allowed projects directory")
     if not target.exists() or not target.is_dir():
         raise ValueError(f"Project not found: {normalized_project}")
     return target
@@ -237,11 +328,14 @@ def safe_project_path(project: str) -> Path:
 
 def safe_file_path(project: str, file: str) -> Path:
     root = safe_project_path(project)
-    target = (root / file).resolve()
+    relative_file = normalize_file_path(file)
+    target = (root / relative_file).resolve()
     if not is_relative_to(target, root.resolve()):
-        raise ValueError("Invalid file path")
+        raise ValueError("Invalid file path: resolved outside the project directory")
     if not target.exists() or not target.is_file():
         raise ValueError(f"File not found: {file}")
+    if not should_include_file(target):
+        raise ValueError(f"File is not in the allowed ForceHub file whitelist: {file}")
     return target
 
 
@@ -260,19 +354,38 @@ def should_include_file(path: Path) -> bool:
     return path.suffix.lower() in allowed_ext or path.name in {"Dockerfile", ".gitignore", "CMakeLists.txt", "Makefile"}
 
 
+def read_text_limited(path: Path, max_chars: int = MAX_FILE_CHARS) -> tuple[str, bool]:
+    with path.open("r", encoding="utf-8", errors="replace") as handle:
+        text = handle.read(max_chars + 1)
+
+    if len(text) > max_chars:
+        logger.error("File exceeds maximum read length of %s chars and was truncated: %s", max_chars, path)
+        return text[:max_chars], True
+
+    return text, False
+
+
 def read_file_safe(path: Path, root: Path) -> str:
     try:
         rel = path.relative_to(root)
-        text = path.read_text(encoding="utf-8", errors="replace")[:MAX_FILE_CHARS]
-        return f"\n\n--- FILE: {rel} ---\n{text}"
+        text, truncated = read_text_limited(path)
+        suffix = f" (truncated after {MAX_FILE_CHARS} chars)" if truncated else ""
+        return f"\n\n--- FILE: {rel}{suffix} ---\n{text}"
     except Exception as e:
+        logger.exception("Failed to read file %s", path)
         return f"\n\n--- FILE ERROR: {path.name}: {e} ---"
 
 
 def build_project_context(project: str) -> str:
     root = safe_project_path(project)
+    if not root.exists() or not root.is_dir():
+        raise ValueError(f"Project directory is invalid: {project}")
     chunks = [f"PROJECT: {project}\nROOT: {root}\n"]
-    files = [p for p in root.rglob("*") if p.is_file() and should_include_file(p)]
+    try:
+        files = [p for p in root.rglob("*") if p.is_file() and should_include_file(p)]
+    except OSError as exc:
+        logger.exception("Failed to scan project context for %s", root)
+        raise RuntimeError(f"Unable to scan project directory: {project}") from exc
     files = sorted(files, key=lambda p: str(p.relative_to(root)))[:MAX_PROJECT_FILES]
     for file in files:
         chunks.append(read_file_safe(file, root))
@@ -284,14 +397,26 @@ def load_cache() -> dict:
     if not PROJECT_CACHE_FILE.exists():
         return {}
     try:
-        return json.loads(PROJECT_CACHE_FILE.read_text(encoding="utf-8"))
-    except Exception:
+        data = json.loads(PROJECT_CACHE_FILE.read_text(encoding="utf-8"))
+        if isinstance(data, dict):
+            return data
+        logger.error("Project cache file must contain a JSON object: %s", PROJECT_CACHE_FILE)
+        return {}
+    except json.JSONDecodeError as exc:
+        logger.error("Invalid JSON in project cache file %s: %s", PROJECT_CACHE_FILE, exc)
+        return {}
+    except OSError:
+        logger.exception("Failed to read project cache file %s", PROJECT_CACHE_FILE)
         return {}
 
 
 def save_cache(data: dict) -> None:
-    ensure_dir(DATA_DIR)
-    PROJECT_CACHE_FILE.write_text(json.dumps(data, indent=2), encoding="utf-8")
+    try:
+        ensure_dir(DATA_DIR)
+        PROJECT_CACHE_FILE.write_text(json.dumps(data, indent=2), encoding="utf-8")
+    except OSError as exc:
+        logger.exception("Failed to save project cache file %s", PROJECT_CACHE_FILE)
+        raise RuntimeError(f"Unable to save project cache: {PROJECT_CACHE_FILE}") from exc
 
 
 def choose_model(model: str, prompt: str) -> str:
@@ -352,7 +477,8 @@ def ask_ollama(prompt: str, model: str) -> tuple[str, str, float]:
 def ask_with_fallback(prompt: str, model: str) -> tuple[str, str, float]:
     try:
         return ask_ollama(prompt, model)
-    except Exception:
+    except Exception as exc:
+        logger.warning("Ollama request failed for model %s, retrying fallback model: %s", model, exc)
         return ask_ollama(prompt, "qwen2.5-coder:1.5b")
 
 
@@ -363,10 +489,15 @@ def save_chat(role: str, content: str) -> None:
     if CHAT_FILE.exists():
         try:
             data = json.loads(CHAT_FILE.read_text(encoding="utf-8"))
-        except Exception:
+        except (OSError, json.JSONDecodeError) as exc:
+            logger.warning("Could not load chat history from %s, starting fresh: %s", CHAT_FILE, exc)
             data = []
     data.append(item)
-    CHAT_FILE.write_text(json.dumps(data[-100:], indent=2), encoding="utf-8")
+    try:
+        CHAT_FILE.write_text(json.dumps(data[-100:], indent=2), encoding="utf-8")
+    except OSError as exc:
+        logger.exception("Failed to save chat history to %s", CHAT_FILE)
+        raise RuntimeError(f"Unable to save chat history: {CHAT_FILE}") from exc
 
 
 def run_cmd(project: str, cmd: list[str], timeout: int = 60) -> str:
@@ -377,7 +508,8 @@ def run_cmd(project: str, cmd: list[str], timeout: int = 60) -> str:
     except subprocess.CalledProcessError as e:
         return e.output.strip()
     except Exception as e:
-        return str(e)
+        logger.exception("Command failed in project %s: %s", project, cmd)
+        return f"Command failed: {e}"
 
 
 def run_git(project: str, args: list[str]) -> str:
@@ -721,30 +853,53 @@ def list_projects():
     return {"projects": list_project_names(), "default_project": DEFAULT_PROJECT}
 
 
-@app.get("/api/files")
-def api_files(project: str = DEFAULT_PROJECT):
+def project_file_listing(project: str, limit: int = 300) -> list[str]:
     root = safe_project_path(project)
     files = [str(p.relative_to(root)) for p in root.rglob("*") if p.is_file() and should_include_file(p)]
-    return {"files": sorted(files)[:300]}
+    return sorted(files)[:limit]
+
+
+def file_content_response(project: str, file: str) -> dict[str, str | int | bool]:
+    target = safe_file_path(project, file)
+    content, truncated = read_text_limited(target)
+    return {"content": content, "truncated": truncated, "max_chars": MAX_FILE_CHARS}
+
+
+def diff_content_response(req: DiffContentRequest) -> dict[str, str | bool]:
+    target = safe_file_path(req.project, req.file)
+    old_content, truncated = read_text_limited(target)
+    if truncated:
+        return {"error": True, "text": f"Cannot diff {req.file}: file exceeds {MAX_FILE_CHARS} characters."}
+    old = old_content.splitlines(keepends=True)
+    new = req.content.splitlines(keepends=True)
+    diff = difflib.unified_diff(old, new, fromfile=f"a/{req.file}", tofile=f"b/{req.file}")
+    text = "".join(diff)
+    return {"text": text or "No changes."}
+
+
+@app.get("/api/files")
+async def api_files(project: str = DEFAULT_PROJECT):
+    try:
+        files = await run_in_threadpool(project_file_listing, project)
+        return {"files": files}
+    except Exception as e:
+        return api_error("List files", e)
 
 
 @app.get("/api/file-content")
-def api_file_content(project: str, file: str):
-    target = safe_file_path(project, file)
-    return {"content": target.read_text(encoding="utf-8", errors="replace")}
+async def api_file_content(project: str, file: str):
+    try:
+        return await run_in_threadpool(file_content_response, project, file)
+    except Exception as e:
+        return api_error("Read file content", e)
 
 
 @app.post("/api/diff-content")
-def api_diff_content(req: DiffContentRequest):
+async def api_diff_content(req: DiffContentRequest):
     try:
-        target = safe_file_path(req.project, req.file)
-        old = target.read_text(encoding="utf-8", errors="replace").splitlines(keepends=True)
-        new = req.content.splitlines(keepends=True)
-        diff = difflib.unified_diff(old, new, fromfile=f"a/{req.file}", tofile=f"b/{req.file}")
-        text = "".join(diff)
-        return {"text": text or "No changes."}
+        return await run_in_threadpool(diff_content_response, req)
     except Exception as e:
-        return {"error": True, "text": str(e)}
+        return api_error("Diff preview", e)
 
 
 @app.post("/api/save-file")
@@ -753,11 +908,11 @@ def api_save_file(req: SaveFileRequest):
         target = safe_file_path(req.project, req.file)
         if req.backup:
             backup = target.with_suffix(target.suffix + f".bak-{datetime.now().strftime('%Y%m%d-%H%M%S')}")
-            backup.write_text(target.read_text(encoding="utf-8", errors="replace"), encoding="utf-8")
+            shutil.copy2(target, backup)
         target.write_text(req.content, encoding="utf-8")
         return {"text": f"Saved {req.file} with backup."}
     except Exception as e:
-        return {"error": True, "text": str(e)}
+        return api_error("Save file", e)
 
 
 @app.get("/api/git")
@@ -797,7 +952,7 @@ DIFF:
         LAST_DEBUG.update({"model": used_model, "elapsed": elapsed, "action": "commit_from_diff"})
         return {"text": answer, "model": used_model}
     except Exception as e:
-        return {"error": True, "text": str(e)}
+        return api_error("Commit message generation", e)
 
 
 @app.get("/api/models")
@@ -806,7 +961,8 @@ def api_models():
         r = requests.get(OLLAMA_TAGS_URL, timeout=10)
         r.raise_for_status()
         return {"models": [m["name"] for m in r.json().get("models", [])]}
-    except Exception:
+    except Exception as exc:
+        logger.warning("Failed to load Ollama models, returning fallback models: %s", exc)
         return {"models": ["qwen2.5-coder:7b", "qwen2.5-coder:1.5b"]}
 
 
@@ -821,26 +977,35 @@ def reset_chat():
     return {"status": "cleared"}
 
 
+def search_project_files(req: SearchRequest) -> dict[str, str]:
+    root = safe_project_path(req.project)
+    q = req.query.lower()
+    results = []
+    for path in root.rglob("*"):
+        if not path.is_file() or not should_include_file(path):
+            continue
+        rel = str(path.relative_to(root))
+        try:
+            with path.open("r", encoding="utf-8", errors="replace") as handle:
+                for line_number, line in enumerate(handle, start=1):
+                    if q in line.lower():
+                        results.append(f"{rel}:{line_number}: {line.strip()}")
+                        if len(results) >= MAX_SEARCH_RESULTS:
+                            break
+        except OSError as exc:
+            logger.warning("Skipping unreadable file during search %s: %s", path, exc)
+            continue
+        if len(results) >= MAX_SEARCH_RESULTS:
+            break
+    return {"text": "\n".join(results) if results else "No results found."}
+
+
 @app.post("/api/search")
-def api_search(req: SearchRequest):
+async def api_search(req: SearchRequest):
     try:
-        root = safe_project_path(req.project)
-        q = req.query.lower()
-        results = []
-        for path in root.rglob("*"):
-            if not path.is_file() or not should_include_file(path):
-                continue
-            rel = str(path.relative_to(root))
-            for i, line in enumerate(path.read_text(encoding="utf-8", errors="replace").splitlines(), start=1):
-                if q in line.lower():
-                    results.append(f"{rel}:{i}: {line.strip()}")
-                    if len(results) >= MAX_SEARCH_RESULTS:
-                        break
-            if len(results) >= MAX_SEARCH_RESULTS:
-                break
-        return {"text": "\n".join(results) if results else "No results found."}
+        return await run_in_threadpool(search_project_files, req)
     except Exception as e:
-        return {"error": True, "text": str(e)}
+        return api_error("Search", e)
 
 
 def run_python_module(project: str, module: str, *args: str, timeout: int = 90) -> str:
@@ -972,7 +1137,7 @@ def api_run_command(req: RunCommandRequest):
         output = commands[req.command](req.project)
         return {"text": output or "Command finished with no output."}
     except Exception as e:
-        return {"error": True, "text": str(e)}
+        return api_error("Run command", e)
 
 
 @app.post("/api/chat")
@@ -988,7 +1153,7 @@ def api_chat(req: ChatRequest):
         LAST_DEBUG.update({"model": used_model, "elapsed": elapsed, "action": "chat"})
         return {"text": answer, "model": used_model, "elapsed": elapsed}
     except Exception as e:
-        return {"error": True, "text": str(e)}
+        return api_error("Chat", e)
 
 
 @app.post("/api/chat-stream")
@@ -1029,7 +1194,8 @@ def api_chat_stream(req: ChatRequest):
             LAST_DEBUG.update({"model": selected_model, "elapsed": elapsed, "action": "chat_stream"})
 
         except Exception as e:
-            yield f"\n[stream error] {e}"
+            logger.exception("Chat stream failed")
+            yield f"\n[stream error] Chat stream failed: {e}"
 
     return StreamingResponse(generate(), media_type="text/plain")
 
@@ -1049,7 +1215,7 @@ def project_action(req: ProjectActionRequest):
         LAST_DEBUG.update({"model": used_model, "elapsed": elapsed, "action": req.action})
         return {"text": answer, "action": req.action, "model": used_model}
     except Exception as e:
-        return {"error": True, "text": str(e)}
+        return api_error("Project action", e)
 
 
 @app.post("/api/cache-project")
@@ -1064,7 +1230,7 @@ def cache_project(req: ProjectActionRequest):
         LAST_DEBUG.update({"model": used_model, "elapsed": elapsed, "action": "cache_project"})
         return {"text": f"Cached project summary.\n\n{answer}", "model": used_model}
     except Exception as e:
-        return {"error": True, "text": str(e)}
+        return api_error("Cache project", e)
 
 
 @app.post("/api/file-action")
@@ -1084,7 +1250,7 @@ def file_action(req: FileReviewRequest):
         LAST_DEBUG.update({"model": used_model, "elapsed": elapsed, "action": f"file_{req.action}"})
         return {"text": answer, "file": req.file, "action": req.action, "model": used_model}
     except Exception as e:
-        return {"error": True, "text": str(e)}
+        return api_error("File action", e)
 
 
 @app.post("/api/save-readme")
@@ -1095,7 +1261,7 @@ def save_readme(req: SaveReadmeRequest):
         readme.write_text(req.content, encoding="utf-8")
         return {"text": f"Saved README.md to {readme}"}
     except Exception as e:
-        return {"error": True, "text": str(e)}
+        return api_error("Save README", e)
 
 
 
@@ -1104,7 +1270,7 @@ def api_detect(project: str = DEFAULT_PROJECT):
     try:
         return detect_project_type(project)
     except Exception as e:
-        return {"error": True, "text": str(e)}
+        return api_error("Project detection", e)
 
 
 @app.post("/api/explain-output")
@@ -1126,18 +1292,18 @@ Rules:
         LAST_DEBUG.update({"model": used_model, "elapsed": elapsed, "action": "explain_output"})
         return {"text": answer, "model": used_model}
     except Exception as e:
-        return {"error": True, "text": str(e)}
+        return api_error("Explain output", e)
 
 
 @app.post("/api/create-cpp-project")
 def api_create_cpp_project(req: CreateCppProjectRequest):
     try:
-        if any(sep in req.project for sep in ("/", "\\")) or ".." in req.project or not req.project.strip():
-            raise ValueError("Invalid project name")
-
-        root = PROJECTS_DIR / req.project
+        project_name = normalize_project_name(req.project)
+        root = (PROJECTS_DIR / project_name).resolve()
+        if not is_relative_to(root, PROJECTS_DIR):
+            raise ValueError("Invalid project path: resolved outside the allowed projects directory")
         if root.exists():
-            raise ValueError(f"Project already exists: {req.project}")
+            raise ValueError(f"Project already exists: {project_name}")
 
         (root / "src").mkdir(parents=True)
         (root / "include").mkdir()
@@ -1149,7 +1315,7 @@ def api_create_cpp_project(req: CreateCppProjectRequest):
 
         (root / "CMakeLists.txt").write_text(
             "cmake_minimum_required(VERSION 3.20)\n"
-            f"project({req.project} LANGUAGES CXX)\n\n"
+            f"project({project_name} LANGUAGES CXX)\n\n"
             "set(CMAKE_CXX_STANDARD 20)\n"
             "set(CMAKE_CXX_STANDARD_REQUIRED ON)\n"
             "set(CMAKE_CXX_EXTENSIONS OFF)\n\n"
@@ -1162,7 +1328,7 @@ def api_create_cpp_project(req: CreateCppProjectRequest):
         )
 
         (root / ".gitignore").write_text("build/\n*.o\n*.exe\n*.out\n.cache/\n", encoding="utf-8")
-        (root / "README.md").write_text(f"# {req.project}\n\nC++20 CMake project.\n", encoding="utf-8")
+        (root / "README.md").write_text(f"# {project_name}\n\nC++20 CMake project.\n", encoding="utf-8")
 
         git_bin = get_git_command()
         git_message = ""
@@ -1182,7 +1348,7 @@ def api_create_cpp_project(req: CreateCppProjectRequest):
             )
         }
     except Exception as e:
-        return {"error": True, "text": str(e)}
+        return api_error("Create C++ project", e)
 
 
 
@@ -1214,7 +1380,7 @@ def api_save_project_settings(req: ProjectSettingsRequest):
 
         return {"text": f"Saved settings for {req.project}"}
     except Exception as e:
-        return {"error": True, "text": str(e)}
+        return api_error("Save project settings", e)
 
 
 @app.post("/ask")
