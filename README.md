@@ -41,6 +41,8 @@ The app listens on `127.0.0.1:8000` by default.
 - `FORCEHUB_OLLAMA_URL`: Ollama base URL, default `http://127.0.0.1:11434`
 - `FORCEHUB_OLLAMA_GENERATE_URL`: full Ollama generate endpoint override
 - `FORCEHUB_OLLAMA_TAGS_URL`: full Ollama tags endpoint override
+- `FORCEHUB_DEFAULT_MODEL`: default model used when a request does not specify one
+- `FORCEHUB_DEFAULT_MODE`: default chat mode, default `normal`
 - `FORCEHUB_HOST`: bind host for the FastAPI server
 - `FORCEHUB_PORT`: bind port for the FastAPI server
 - `FORCEHUB_GIT_BIN`: explicit path to the `git` executable

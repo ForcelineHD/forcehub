@@ -20,7 +20,7 @@ import requests
 from fastapi import FastAPI, Request
 from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import HTMLResponse, PlainTextResponse, StreamingResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 APP_NAME = "forcehub"
 APP_VERSION = "0.8.0"
@@ -79,6 +79,12 @@ PROJECT_SETTINGS_FILE = DATA_DIR / "project_settings.json"
 OLLAMA_BASE_URL = env_str("FORCEHUB_OLLAMA_URL", "http://127.0.0.1:11434").rstrip("/")
 OLLAMA_GENERATE_URL = env_str("FORCEHUB_OLLAMA_GENERATE_URL", f"{OLLAMA_BASE_URL}/api/generate")
 OLLAMA_TAGS_URL = env_str("FORCEHUB_OLLAMA_TAGS_URL", f"{OLLAMA_BASE_URL}/api/tags")
+VALID_MODES = {"normal", "code", "cpp", "short", "explain"}
+DEFAULT_MODEL = env_str("FORCEHUB_DEFAULT_MODEL", "qwen2.5-coder:1.5b")
+DEFAULT_MODE = env_str("FORCEHUB_DEFAULT_MODE", "normal")
+if DEFAULT_MODE not in VALID_MODES:
+    logger.warning("Invalid FORCEHUB_DEFAULT_MODE %s; using normal", DEFAULT_MODE)
+    DEFAULT_MODE = "normal"
 
 MAX_FILE_CHARS = 8000
 MAX_PROJECT_FILES = 15
@@ -114,6 +120,27 @@ class AuthConfig:
     disabled: bool
 
 
+class ForceHubModel(BaseModel):
+    model_config = ConfigDict(str_strip_whitespace=True)
+
+    @field_validator("project", check_fields=False)
+    @classmethod
+    def validate_project_field(cls, value: str) -> str:
+        return normalize_project_name(value)
+
+    @field_validator("file", check_fields=False)
+    @classmethod
+    def validate_file_field(cls, value: str) -> str:
+        return str(normalize_file_path(value))
+
+    @field_validator("model", "preferred_model", check_fields=False)
+    @classmethod
+    def validate_model_field(cls, value: str) -> str:
+        if not value or CONTROL_CHAR_PATTERN.search(value) or len(value) > 128:
+            raise ValueError("Invalid model name")
+        return value
+
+
 def redact_sensitive(value: object) -> str:
     return SENSITIVE_LOG_PATTERN.sub(lambda match: f"{match.group(1) or match.group(2)}[REDACTED]", str(value))
 
@@ -134,71 +161,71 @@ class StatusResponse(BaseModel):
     version: str
 
 
-class ChatRequest(BaseModel):
-    prompt: str
-    model: str = "auto"
-    mode: Literal["normal", "code", "cpp", "short", "explain"] = "normal"
+class ChatRequest(ForceHubModel):
+    prompt: str = Field(min_length=1, max_length=12000)
+    model: str = DEFAULT_MODEL
+    mode: Literal["normal", "code", "cpp", "short", "explain"] = DEFAULT_MODE
     project: str = DEFAULT_PROJECT
     project_mode: bool = False
 
 
-class FileReviewRequest(BaseModel):
+class FileReviewRequest(ForceHubModel):
     project: str = DEFAULT_PROJECT
     file: str
-    model: str = "auto"
+    model: str = DEFAULT_MODEL
     action: Literal["review", "bugs", "explain", "patch"] = "review"
 
 
-class ProjectActionRequest(BaseModel):
+class ProjectActionRequest(ForceHubModel):
     action: Literal["analyze", "bugs", "readme", "commit"]
-    model: str = "auto"
+    model: str = DEFAULT_MODEL
     project: str = DEFAULT_PROJECT
 
 
-class SearchRequest(BaseModel):
+class SearchRequest(ForceHubModel):
     project: str = DEFAULT_PROJECT
-    query: str
+    query: str = Field(min_length=1, max_length=200)
 
 
-class SaveReadmeRequest(BaseModel):
+class SaveReadmeRequest(ForceHubModel):
     project: str = DEFAULT_PROJECT
     content: str = Field(max_length=MAX_FILE_CHARS)
 
 
-class SaveFileRequest(BaseModel):
+class SaveFileRequest(ForceHubModel):
     project: str = DEFAULT_PROJECT
-    file: str
+    file: str = Field(min_length=1, max_length=512)
     content: str = Field(max_length=MAX_FILE_CHARS)
     backup: bool = True
 
 
-class DiffContentRequest(BaseModel):
+class DiffContentRequest(ForceHubModel):
     project: str = DEFAULT_PROJECT
-    file: str
+    file: str = Field(min_length=1, max_length=512)
     content: str = Field(max_length=MAX_FILE_CHARS)
 
 
-class RunCommandRequest(BaseModel):
+class RunCommandRequest(ForceHubModel):
     project: str = DEFAULT_PROJECT
     command: Literal["git_status", "pytest", "ruff", "ruff_fix", "python_compile", "cpp_compile", "cmake_configure", "cmake_build", "cppcheck", "clang_tidy", "bandit", "npm_test", "npm_build", "npm_audit", "health"]
 
 
 
-class ExplainOutputRequest(BaseModel):
+class ExplainOutputRequest(ForceHubModel):
     project: str = DEFAULT_PROJECT
-    output: str
-    model: str = "auto"
+    output: str = Field(min_length=1, max_length=12000)
+    model: str = DEFAULT_MODEL
 
 
-class CreateCppProjectRequest(BaseModel):
+class CreateCppProjectRequest(ForceHubModel):
     project: str
 
 
 
-class ProjectSettingsRequest(BaseModel):
+class ProjectSettingsRequest(ForceHubModel):
     project: str = DEFAULT_PROJECT
-    preferred_model: str = "auto"
-    preferred_mode: str = "normal"
+    preferred_model: str = DEFAULT_MODEL
+    preferred_mode: Literal["normal", "code", "cpp", "short", "explain"] = DEFAULT_MODE
     project_context: bool = False
 
 
@@ -1563,8 +1590,8 @@ def api_get_project_settings(project: str = DEFAULT_PROJECT):
     data = load_project_settings()
     return data.get(project, {
         "project": project,
-        "preferred_model": "auto",
-        "preferred_mode": "normal",
+        "preferred_model": DEFAULT_MODEL,
+        "preferred_mode": DEFAULT_MODE,
         "project_context": False,
     })
 
