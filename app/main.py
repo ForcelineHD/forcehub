@@ -190,6 +190,8 @@ RATE_LIMIT_WINDOW_SECONDS = env_int("FORCEHUB_RATE_LIMIT_WINDOW_SECONDS", 60, mi
 RATE_LIMIT_DISABLED = env_bool("FORCEHUB_RATE_LIMIT_DISABLED")
 
 MAX_FILE_CHARS = 8000
+REVIEW_CHUNK_CHARS = env_int("FORCEHUB_REVIEW_CHUNK_CHARS", 8000, minimum=2000, maximum=20000)
+REVIEW_MAX_CHUNKS = env_int("FORCEHUB_REVIEW_MAX_CHUNKS", 8, minimum=1, maximum=20)
 MAX_PROJECT_FILES = 15
 MAX_SEARCH_RESULTS = 80
 CPP_SOURCE_PATTERNS = ("*.cpp", "*.cc", "*.cxx")
@@ -221,6 +223,14 @@ class AuthConfig:
     username: str
     password: str
     disabled: bool
+
+
+@dataclass(frozen=True)
+class ReviewChunk:
+    index: int
+    start_char: int
+    end_char: int
+    content: str
 
 
 class ForceHubModel(BaseModel):
@@ -733,8 +743,18 @@ def iter_project_files(root: Path):
 def format_truncation_warning(path: Path | str, max_chars: int) -> str:
     return (
         f"{TRUNCATION_WARNING_PREFIX} {path} exceeded {max_chars} characters. "
-        "The model only saw partial file content."
+        "This non-chunked view only includes partial file content; Bugs/Review file actions use chunked review."
     )
+
+
+def format_chunked_review_warning(path: Path | str, chunk_chars: int, chunks_used: int, limited: bool) -> str:
+    message = (
+        f"{TRUNCATION_WARNING_PREFIX} {path} exceeded {chunk_chars} characters, so Bugs/Review used chunked review "
+        f"with {chunks_used} chunk(s) of up to {chunk_chars} characters."
+    )
+    if limited:
+        message += f" Only the first {chunks_used} chunk(s) were reviewed because FORCEHUB_REVIEW_MAX_CHUNKS={REVIEW_MAX_CHUNKS}."
+    return message
 
 
 def collect_truncation_warnings(text: str) -> list[str]:
@@ -776,6 +796,30 @@ def read_file_safe(path: Path, root: Path) -> str:
     except Exception as e:
         logger.exception("Failed to read file %s", path)
         return f"\n\n--- FILE ERROR: {path.name}: {e} ---"
+
+
+def read_review_chunks(path: Path, root: Path) -> tuple[Path, list[ReviewChunk], str]:
+    rel = path.relative_to(root)
+    chunks: list[ReviewChunk] = []
+    start_char = 0
+    with path.open("r", encoding="utf-8", errors="replace") as handle:
+        for index in range(1, REVIEW_MAX_CHUNKS + 1):
+            content = handle.read(REVIEW_CHUNK_CHARS)
+            if not content:
+                break
+            end_char = start_char + len(content)
+            chunks.append(ReviewChunk(index=index, start_char=start_char, end_char=end_char, content=content))
+            start_char = end_char
+        limited = bool(handle.read(1))
+
+    if not chunks:
+        chunks.append(ReviewChunk(index=1, start_char=0, end_char=0, content=""))
+
+    warning = ""
+    if len(chunks) > 1 or limited:
+        warning = format_chunked_review_warning(rel, REVIEW_CHUNK_CHARS, len(chunks), limited)
+        logger.warning(warning)
+    return rel, chunks, warning
 
 
 def build_project_context(project: str) -> str:
@@ -979,6 +1023,53 @@ def clean_confirmed_audit_answer(answer: str) -> str:
         logger.warning("Converted generic audit response without exact evidence into no confirmed issue")
         return NO_CONFIRMED_ISSUE
     return text
+
+
+def is_no_confirmed_issue_answer(answer: str) -> bool:
+    text = answer.strip()
+    return text == NO_CONFIRMED_ISSUE or text.endswith(f"\n\n{NO_CONFIRMED_ISSUE}")
+
+
+def build_review_chunk_prompt(task: str, rel_path: Path, chunk: ReviewChunk, total_chunks: int, warning: str) -> str:
+    chunk_context = f"""File: {rel_path}
+Chunk: {chunk.index} of {total_chunks}
+Character range: {chunk.start_char}-{chunk.end_char}
+{warning}
+
+--- CHUNK CONTENT ---
+{chunk.content}
+"""
+    return build_confirmed_audit_prompt("file chunk", task, "File chunk content", chunk_context)
+
+
+def combine_chunk_review_answers(warning: str, chunk_answers: list[tuple[ReviewChunk, str]]) -> str:
+    findings = []
+    for chunk, answer in chunk_answers:
+        cleaned = clean_confirmed_audit_answer(answer)
+        if is_no_confirmed_issue_answer(cleaned):
+            continue
+        findings.append(f"Chunk {chunk.index} ({chunk.start_char}-{chunk.end_char}):\n{cleaned}")
+
+    body = "\n\n".join(findings) if findings else NO_CONFIRMED_ISSUE
+    if warning:
+        return f"{warning}\n\n{body}"
+    return body
+
+
+def review_file_in_chunks(path: Path, root: Path, task: str, model: str) -> tuple[str, str, float]:
+    rel_path, chunks, warning = read_review_chunks(path, root)
+    chunk_answers: list[tuple[ReviewChunk, str]] = []
+    used_models: list[str] = []
+    elapsed_total = 0.0
+    for chunk in chunks:
+        prompt = build_review_chunk_prompt(task, rel_path, chunk, len(chunks), warning)
+        answer, used_model, elapsed = ask_with_fallback(prompt, model)
+        chunk_answers.append((chunk, answer))
+        used_models.append(used_model)
+        elapsed_total += elapsed
+
+    unique_models = list(dict.fromkeys(used_models))
+    return combine_chunk_review_answers(warning, chunk_answers), ", ".join(unique_models), round(elapsed_total, 2)
 
 
 def save_chat(role: str, content: str) -> None:
@@ -1770,7 +1861,6 @@ def file_action(req: FileReviewRequest):
     try:
         root = safe_project_path(req.project)
         file_path = safe_file_path(req.project, req.file)
-        content = read_file_safe(file_path, root)
         prompts = {
             "review": "Review this file for confirmed bugs, security issues, and reliability problems.",
             "bugs": "Find confirmed bugs, security issues, and reliability problems in this file.",
@@ -1778,13 +1868,12 @@ def file_action(req: FileReviewRequest):
             "patch": "Suggest a safe patch. Do not apply it. Show replacement code blocks only.",
         }
         if req.action in {"review", "bugs"}:
-            final_prompt = build_confirmed_audit_prompt("file", prompts[req.action], "File content", content)
+            answer, used_model, elapsed = review_file_in_chunks(file_path, root, prompts[req.action], req.model)
         else:
+            content = read_file_safe(file_path, root)
             final_prompt = f"You are ForceHub AI file reviewer.\n\nTask:\n{prompts[req.action]}\n\nFile content:\n{content}\n"
-        answer, used_model, elapsed = ask_with_fallback(final_prompt, req.model)
-        if req.action in {"review", "bugs"}:
-            answer = clean_confirmed_audit_answer(answer)
-        answer = prepend_truncation_warnings(answer, content)
+            answer, used_model, elapsed = ask_with_fallback(final_prompt, req.model)
+            answer = prepend_truncation_warnings(answer, content)
         LAST_DEBUG.update({"model": used_model, "elapsed": elapsed, "action": f"file_{req.action}"})
         return {"text": answer, "file": req.file, "action": req.action, "model": used_model}
     except Exception as e:
