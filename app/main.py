@@ -378,6 +378,29 @@ def should_include_file(path: Path) -> bool:
     return path.suffix.lower() in allowed_ext or path.name in {"Dockerfile", ".gitignore", "CMakeLists.txt", "Makefile"}
 
 
+def iter_project_files(root: Path):
+    root = root.resolve()
+    if not root.exists() or not root.is_dir():
+        raise ValueError(f"Invalid project root: {root}")
+
+    seen: set[Path] = set()
+    for path in root.rglob("*"):
+        try:
+            if not path.is_file():
+                continue
+            resolved = path.resolve()
+        except OSError as exc:
+            logger.warning("Skipping inaccessible project file %s: %s", path, exc)
+            continue
+        if not is_relative_to(resolved, root):
+            logger.warning("Skipping project file outside root: %s", path)
+            continue
+        if resolved in seen or not should_include_file(path) or not should_include_file(resolved):
+            continue
+        seen.add(resolved)
+        yield resolved
+
+
 def read_text_limited(path: Path, max_chars: int = MAX_FILE_CHARS) -> tuple[str, bool]:
     with path.open("r", encoding="utf-8", errors="replace") as handle:
         text = handle.read(max_chars + 1)
@@ -406,8 +429,8 @@ def build_project_context(project: str) -> str:
         raise ValueError(f"Project directory is invalid: {project}")
     chunks = [f"PROJECT: {project}\nROOT: {root}\n"]
     try:
-        files = [p for p in root.rglob("*") if p.is_file() and should_include_file(p)]
-    except OSError as exc:
+        files = list(iter_project_files(root))
+    except (OSError, ValueError) as exc:
         logger.exception("Failed to scan project context for %s", root)
         raise RuntimeError(f"Unable to scan project directory: {project}") from exc
     files = sorted(files, key=lambda p: str(p.relative_to(root)))[:MAX_PROJECT_FILES]
@@ -879,7 +902,7 @@ def list_projects():
 
 def project_file_listing(project: str, limit: int = 300) -> list[str]:
     root = safe_project_path(project)
-    files = [str(p.relative_to(root)) for p in root.rglob("*") if p.is_file() and should_include_file(p)]
+    files = [str(p.relative_to(root)) for p in iter_project_files(root)]
     return sorted(files)[:limit]
 
 
@@ -1005,9 +1028,7 @@ def search_project_files(req: SearchRequest) -> dict[str, str]:
     root = safe_project_path(req.project)
     q = req.query.lower()
     results = []
-    for path in root.rglob("*"):
-        if not path.is_file() or not should_include_file(path):
-            continue
+    for path in iter_project_files(root):
         rel = str(path.relative_to(root))
         try:
             with path.open("r", encoding="utf-8", errors="replace") as handle:
