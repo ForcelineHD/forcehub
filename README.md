@@ -32,11 +32,24 @@ The app listens on `127.0.0.1:8000` by default.
 ## Configuration
 
 - `FORCEHUB_PROJECTS_DIR`: directory that contains the projects ForceHub should inspect
-- `FORCEHUB_DEFAULT_PROJECT`: project selected by default in the UI
+- `FORCEHUB_DEFAULT_PROJECT`: project selected by default in the UI; if unset, the UI selects the first allowed project
 - `FORCEHUB_DATA_DIR`: directory used for chat history and cached settings
 - `FORCEHUB_USERNAME`: basic-auth username
 - `FORCEHUB_PASSWORD`: basic-auth password
+- `FORCEHUB_PASSWORD_FILE`: path to a file containing the basic-auth password
 - `FORCEHUB_AUTH_DISABLED`: set to `1` only for an intentionally unauthenticated local instance
+- `FORCEHUB_OLLAMA_URL`: Ollama base URL, default `http://127.0.0.1:11434`
+- `FORCEHUB_OLLAMA_GENERATE_URL`: full Ollama generate endpoint override
+- `FORCEHUB_OLLAMA_TAGS_URL`: full Ollama tags endpoint override
+- `FORCEHUB_DEFAULT_MODEL`: default model used when a request does not specify one
+- `FORCEHUB_DEFAULT_MODE`: default chat mode, default `normal`
 - `FORCEHUB_HOST`: bind host for the FastAPI server
 - `FORCEHUB_PORT`: bind port for the FastAPI server
 - `FORCEHUB_GIT_BIN`: explicit path to the `git` executable
+- `FORCEHUB_LOG_LEVEL`: app log level, default `INFO`
+- `FORCEHUB_LOG_FILE`: optional rotating log file path; unset keeps app logs off disk
+- `FORCEHUB_LOG_MAX_BYTES`: maximum size for one log file before rotation
+- `FORCEHUB_LOG_BACKUP_COUNT`: number of rotated log files to keep
+- `FORCEHUB_RATE_LIMIT_REQUESTS`: requests allowed per client/path window, default `120`
+- `FORCEHUB_RATE_LIMIT_WINDOW_SECONDS`: rate-limit window in seconds, default `60`
+- `FORCEHUB_RATE_LIMIT_DISABLED`: set to `1` to disable rate limiting

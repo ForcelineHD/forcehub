@@ -3,51 +3,110 @@ import difflib
 import importlib.util
 import json
 import logging
+from logging.handlers import RotatingFileHandler
 import os
+import re
 import secrets
 import shutil
 import subprocess
 import sys
 import time
+from collections import defaultdict, deque
 from dataclasses import dataclass
 from datetime import datetime
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Literal
 
 import requests
 from fastapi import FastAPI, Request
 from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import HTMLResponse, PlainTextResponse, StreamingResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 APP_NAME = "forcehub"
 APP_VERSION = "0.8.0"
+logger = logging.getLogger(APP_NAME)
 
 BASE_DIR = Path(__file__).resolve().parent.parent
-PROJECTS_DIR = Path(os.getenv("FORCEHUB_PROJECTS_DIR", str(BASE_DIR.parent))).expanduser().resolve()
-DEFAULT_PROJECT = os.getenv("FORCEHUB_DEFAULT_PROJECT", BASE_DIR.name)
-DATA_DIR = Path(os.getenv("FORCEHUB_DATA_DIR", str(BASE_DIR / "data"))).expanduser().resolve()
+
+
+def env_bool(name: str, default: bool = False) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    normalized = raw.strip().casefold()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off", ""}:
+        return False
+    logger.warning("Invalid boolean value for %s; using default %s", name, default)
+    return default
+
+
+def env_int(name: str, default: int, *, minimum: int | None = None, maximum: int | None = None) -> int:
+    raw = os.getenv(name)
+    if raw is None or not raw.strip():
+        return default
+    try:
+        value = int(raw.strip())
+    except ValueError:
+        logger.warning("Invalid integer value for %s; using default %s", name, default)
+        return default
+    if minimum is not None and value < minimum:
+        logger.warning("%s below minimum %s; using default %s", name, minimum, default)
+        return default
+    if maximum is not None and value > maximum:
+        logger.warning("%s above maximum %s; using default %s", name, maximum, default)
+        return default
+    return value
+
+
+def env_str(name: str, default: str = "") -> str:
+    return os.getenv(name, default).strip()
+
+
+def env_path(name: str, default: Path | str) -> Path:
+    raw = env_str(name, str(default))
+    return Path(raw).expanduser().resolve()
+
+
+PROJECTS_DIR = env_path("FORCEHUB_PROJECTS_DIR", BASE_DIR.parent)
+DEFAULT_PROJECT = env_str("FORCEHUB_DEFAULT_PROJECT")
+DATA_DIR = env_path("FORCEHUB_DATA_DIR", BASE_DIR / "data")
 CHAT_FILE = DATA_DIR / "chats.json"
 PROJECT_CACHE_FILE = DATA_DIR / "project_cache.json"
 PROJECT_SETTINGS_FILE = DATA_DIR / "project_settings.json"
-FORCEHUB_USERNAME = os.getenv("FORCEHUB_USERNAME", "").strip()
-FORCEHUB_PASSWORD = os.getenv("FORCEHUB_PASSWORD", "")
-FORCEHUB_AUTH_DISABLED = os.getenv("FORCEHUB_AUTH_DISABLED", "").strip().lower() in {"1", "true", "yes", "on"}
 
-OLLAMA_GENERATE_URL = "http://127.0.0.1:11434/api/generate"
-OLLAMA_TAGS_URL = "http://127.0.0.1:11434/api/tags"
+OLLAMA_BASE_URL = env_str("FORCEHUB_OLLAMA_URL", "http://127.0.0.1:11434").rstrip("/")
+OLLAMA_GENERATE_URL = env_str("FORCEHUB_OLLAMA_GENERATE_URL", f"{OLLAMA_BASE_URL}/api/generate")
+OLLAMA_TAGS_URL = env_str("FORCEHUB_OLLAMA_TAGS_URL", f"{OLLAMA_BASE_URL}/api/tags")
+VALID_MODES = {"normal", "code", "cpp", "short", "explain"}
+DEFAULT_MODEL = env_str("FORCEHUB_DEFAULT_MODEL", "qwen2.5-coder:1.5b")
+DEFAULT_MODE = env_str("FORCEHUB_DEFAULT_MODE", "normal")
+if DEFAULT_MODE not in VALID_MODES:
+    logger.warning("Invalid FORCEHUB_DEFAULT_MODE %s; using normal", DEFAULT_MODE)
+    DEFAULT_MODE = "normal"
+RATE_LIMIT_REQUESTS = env_int("FORCEHUB_RATE_LIMIT_REQUESTS", 120, minimum=1)
+RATE_LIMIT_WINDOW_SECONDS = env_int("FORCEHUB_RATE_LIMIT_WINDOW_SECONDS", 60, minimum=1)
+RATE_LIMIT_DISABLED = env_bool("FORCEHUB_RATE_LIMIT_DISABLED")
 
 MAX_FILE_CHARS = 8000
 MAX_PROJECT_FILES = 15
 MAX_SEARCH_RESULTS = 80
 CPP_SOURCE_PATTERNS = ("*.cpp", "*.cc", "*.cxx")
 CPP_HEADER_PATTERNS = ("*.h", "*.hh", "*.hpp", "*.hxx")
+PROJECT_NAME_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+CONTROL_CHAR_PATTERN = re.compile(r"[\x00-\x1f\x7f]")
+SENSITIVE_LOG_PATTERN = re.compile(
+    r"(?i)(authorization\s*[:=]\s*(?:basic|bearer)\s+)[^\s,;]+"
+    r"|((?:password|passwd|pwd|token|secret|api[_-]?key)\s*[:=]\s*)[^\s,;]+"
+)
 
 app = FastAPI(title="ForceHub", description="Local AI dev dashboard.", version=APP_VERSION)
-logger = logging.getLogger(APP_NAME)
 
 CHAT_HISTORY: list[dict[str, str]] = []
 LAST_DEBUG: dict[str, str | int | float] = {}
+RATE_LIMIT_BUCKETS: dict[str, deque[float]] = defaultdict(deque)
 
 
 @dataclass(frozen=True)
@@ -59,82 +118,165 @@ class AuthResult:
         return self.ok
 
 
+@dataclass(frozen=True)
+class AuthConfig:
+    username: str
+    password: str
+    disabled: bool
+
+
+class ForceHubModel(BaseModel):
+    model_config = ConfigDict(str_strip_whitespace=True)
+
+    @field_validator("project", check_fields=False)
+    @classmethod
+    def validate_project_field(cls, value: str) -> str:
+        return normalize_project_name(value)
+
+    @field_validator("file", check_fields=False)
+    @classmethod
+    def validate_file_field(cls, value: str) -> str:
+        return str(normalize_file_path(value))
+
+    @field_validator("model", "preferred_model", check_fields=False)
+    @classmethod
+    def validate_model_field(cls, value: str) -> str:
+        if not value or CONTROL_CHAR_PATTERN.search(value) or len(value) > 128:
+            raise ValueError("Invalid model name")
+        return value
+
+
+def redact_sensitive(value: object) -> str:
+    return SENSITIVE_LOG_PATTERN.sub(lambda match: f"{match.group(1) or match.group(2)}[REDACTED]", str(value))
+
+
+class SensitiveLogFilter(logging.Filter):
+    def filter(self, record: logging.LogRecord) -> bool:
+        record.msg = redact_sensitive(record.msg)
+        if isinstance(record.args, dict):
+            record.args = {key: redact_sensitive(value) for key, value in record.args.items()}
+        elif record.args:
+            record.args = tuple(redact_sensitive(arg) for arg in record.args)
+        return True
+
+
 class StatusResponse(BaseModel):
     status: str
     app: str
     version: str
 
 
-class ChatRequest(BaseModel):
-    prompt: str
-    model: str = "auto"
-    mode: Literal["normal", "code", "cpp", "short", "explain"] = "normal"
+class ChatRequest(ForceHubModel):
+    prompt: str = Field(min_length=1, max_length=12000)
+    model: str = DEFAULT_MODEL
+    mode: Literal["normal", "code", "cpp", "short", "explain"] = DEFAULT_MODE
     project: str = DEFAULT_PROJECT
     project_mode: bool = False
 
 
-class FileReviewRequest(BaseModel):
+class FileReviewRequest(ForceHubModel):
     project: str = DEFAULT_PROJECT
     file: str
-    model: str = "auto"
+    model: str = DEFAULT_MODEL
     action: Literal["review", "bugs", "explain", "patch"] = "review"
 
 
-class ProjectActionRequest(BaseModel):
+class ProjectActionRequest(ForceHubModel):
     action: Literal["analyze", "bugs", "readme", "commit"]
-    model: str = "auto"
+    model: str = DEFAULT_MODEL
     project: str = DEFAULT_PROJECT
 
 
-class SearchRequest(BaseModel):
+class SearchRequest(ForceHubModel):
     project: str = DEFAULT_PROJECT
-    query: str
+    query: str = Field(min_length=1, max_length=200)
 
 
-class SaveReadmeRequest(BaseModel):
+class SaveReadmeRequest(ForceHubModel):
     project: str = DEFAULT_PROJECT
-    content: str
+    content: str = Field(max_length=MAX_FILE_CHARS)
 
 
-class SaveFileRequest(BaseModel):
+class SaveFileRequest(ForceHubModel):
     project: str = DEFAULT_PROJECT
-    file: str
-    content: str
+    file: str = Field(min_length=1, max_length=512)
+    content: str = Field(max_length=MAX_FILE_CHARS)
     backup: bool = True
 
 
-class DiffContentRequest(BaseModel):
+class DiffContentRequest(ForceHubModel):
     project: str = DEFAULT_PROJECT
-    file: str
-    content: str
+    file: str = Field(min_length=1, max_length=512)
+    content: str = Field(max_length=MAX_FILE_CHARS)
 
 
-class RunCommandRequest(BaseModel):
+class RunCommandRequest(ForceHubModel):
     project: str = DEFAULT_PROJECT
     command: Literal["git_status", "pytest", "ruff", "ruff_fix", "python_compile", "cpp_compile", "cmake_configure", "cmake_build", "cppcheck", "clang_tidy", "bandit", "npm_test", "npm_build", "npm_audit", "health"]
 
 
 
-class ExplainOutputRequest(BaseModel):
+class ExplainOutputRequest(ForceHubModel):
     project: str = DEFAULT_PROJECT
-    output: str
-    model: str = "auto"
+    output: str = Field(min_length=1, max_length=12000)
+    model: str = DEFAULT_MODEL
 
 
-class CreateCppProjectRequest(BaseModel):
+class CreateCppProjectRequest(ForceHubModel):
     project: str
 
 
 
-class ProjectSettingsRequest(BaseModel):
+class ProjectSettingsRequest(ForceHubModel):
     project: str = DEFAULT_PROJECT
-    preferred_model: str = "auto"
-    preferred_mode: str = "normal"
+    preferred_model: str = DEFAULT_MODEL
+    preferred_mode: Literal["normal", "code", "cpp", "short", "explain"] = DEFAULT_MODE
     project_context: bool = False
 
 
-def ensure_dir(path: Path) -> None:
-    path.mkdir(parents=True, exist_ok=True)
+def ensure_dir(path: Path, *, private: bool = True) -> None:
+    try:
+        path.mkdir(parents=True, exist_ok=True, mode=0o700 if private else 0o755)
+    except PermissionError as exc:
+        logger.exception("Insufficient permissions to create directory %s", path)
+        raise RuntimeError(f"Insufficient permissions to create directory: {path}") from exc
+    except OSError as exc:
+        logger.exception("Unable to create directory %s", path)
+        raise RuntimeError(f"Unable to create directory: {path}") from exc
+    if not path.is_dir():
+        raise RuntimeError(f"Expected directory path is not a directory: {path}")
+
+
+def configure_logging() -> None:
+    level_name = env_str("FORCEHUB_LOG_LEVEL", "INFO").upper()
+    level = getattr(logging, level_name, logging.INFO)
+    logger.setLevel(level)
+    if not any(isinstance(existing_filter, SensitiveLogFilter) for existing_filter in logger.filters):
+        logger.addFilter(SensitiveLogFilter())
+
+    log_file = env_str("FORCEHUB_LOG_FILE")
+    if not log_file:
+        return
+
+    log_path = Path(log_file).expanduser().resolve()
+    if any(getattr(handler, "_forcehub_log_file", None) == str(log_path) for handler in logger.handlers):
+        return
+
+    ensure_dir(log_path.parent)
+    handler = RotatingFileHandler(
+        log_path,
+        maxBytes=env_int("FORCEHUB_LOG_MAX_BYTES", 1_048_576, minimum=1),
+        backupCount=env_int("FORCEHUB_LOG_BACKUP_COUNT", 3, minimum=0),
+        encoding="utf-8",
+    )
+    handler._forcehub_log_file = str(log_path)
+    handler.setLevel(level)
+    handler.addFilter(SensitiveLogFilter())
+    handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s"))
+    logger.addHandler(handler)
+
+
+configure_logging()
 
 
 def is_relative_to(path: Path, other: Path) -> bool:
@@ -150,9 +292,12 @@ def normalize_project_name(project: str) -> str:
     if not normalized:
         raise ValueError("Project name is required")
 
-    path = Path(normalized)
-    if path.is_absolute() or path.drive or len(path.parts) != 1 or normalized in {".", ".."}:
+    if CONTROL_CHAR_PATTERN.search(normalized):
+        raise ValueError("Invalid project name: control characters are not allowed")
+    if "/" in normalized or "\\" in normalized:
         raise ValueError("Invalid project name: use a direct project directory name")
+    if not PROJECT_NAME_PATTERN.fullmatch(normalized) or normalized in {".", ".."}:
+        raise ValueError("Invalid project name: use letters, numbers, dots, dashes, or underscores")
 
     return normalized
 
@@ -161,18 +306,31 @@ def normalize_file_path(file: str) -> Path:
     normalized = file.strip()
     if not normalized:
         raise ValueError("File path is required")
+    if CONTROL_CHAR_PATTERN.search(normalized):
+        raise ValueError("Invalid file path: control characters are not allowed")
 
-    path = Path(normalized)
-    if path.is_absolute() or path.drive or any(part in {".", ".."} for part in path.parts):
+    normalized = normalized.replace("\\", "/")
+    path = PurePosixPath(normalized)
+    if path.is_absolute() or any(part in {"", ".", ".."} for part in path.parts):
         raise ValueError("Invalid file path: use a project-relative file path")
+    if any(":" in part for part in path.parts):
+        raise ValueError("Invalid file path: drive-qualified paths are not allowed")
+    if any(CONTROL_CHAR_PATTERN.search(part) for part in path.parts):
+        raise ValueError("Invalid file path: control characters are not allowed")
 
-    return path
+    return Path(*path.parts)
 
 
 def list_project_names() -> list[str]:
-    ensure_dir(PROJECTS_DIR)
+    ensure_dir(PROJECTS_DIR, private=False)
     projects = []
-    for path in PROJECTS_DIR.iterdir():
+    try:
+        candidates = list(PROJECTS_DIR.iterdir())
+    except OSError as exc:
+        logger.exception("Unable to list configured projects directory %s", PROJECTS_DIR)
+        raise RuntimeError(f"Unable to list projects directory: {PROJECTS_DIR}") from exc
+
+    for path in candidates:
         if not path.is_dir():
             continue
         try:
@@ -181,23 +339,36 @@ def list_project_names() -> list[str]:
         except (OSError, ValueError) as exc:
             logger.warning("Skipping invalid project directory %s: %s", path, exc)
             continue
-        if is_relative_to(resolved, PROJECTS_DIR):
+        if is_relative_to(resolved, PROJECTS_DIR) and os.access(resolved, os.R_OK | os.X_OK):
             projects.append(normalized)
+        else:
+            logger.warning("Skipping inaccessible or out-of-root project directory %s", path)
     return sorted(projects)
 
 
 def find_files(root: Path, patterns: tuple[str, ...]) -> list[Path]:
+    root = root.resolve()
+    if not root.exists() or not root.is_dir():
+        raise ValueError(f"Invalid project root: {root}")
+
     found: list[Path] = []
     seen: set[Path] = set()
     for pattern in patterns:
         for path in root.rglob(pattern):
-            if not path.is_file():
+            try:
+                if not path.is_file():
+                    continue
+                resolved = path.resolve()
+            except OSError as exc:
+                logger.warning("Skipping inaccessible file during discovery %s: %s", path, exc)
                 continue
-            resolved = path.resolve()
+            if not is_relative_to(resolved, root):
+                logger.warning("Skipping file outside project root during discovery: %s", path)
+                continue
             if resolved in seen:
                 continue
             seen.add(resolved)
-            found.append(path)
+            found.append(resolved)
     return sorted(found, key=lambda path: str(path.relative_to(root)))
 
 
@@ -220,19 +391,39 @@ def get_git_command() -> str | None:
     return resolve_executable("git")
 
 
+def read_secret_file(path: str) -> str:
+    secret_path = Path(path).expanduser().resolve()
+    try:
+        return secret_path.read_text(encoding="utf-8").strip()
+    except OSError as exc:
+        logger.error("Unable to read configured secret file %s: %s", secret_path, exc)
+        return ""
+
+
+def get_auth_config() -> AuthConfig:
+    password_file = env_str("FORCEHUB_PASSWORD_FILE")
+    password = read_secret_file(password_file) if password_file else os.getenv("FORCEHUB_PASSWORD", "")
+    return AuthConfig(
+        username=env_str("FORCEHUB_USERNAME"),
+        password=password,
+        disabled=env_bool("FORCEHUB_AUTH_DISABLED"),
+    )
+
+
 
 def is_auth_disabled() -> bool:
-    return FORCEHUB_AUTH_DISABLED
+    return get_auth_config().disabled
 
 
 def check_basic_auth(request: Request) -> AuthResult:
-    if is_auth_disabled():
+    auth_config = get_auth_config()
+    if auth_config.disabled:
         return AuthResult(True)
 
-    if not FORCEHUB_USERNAME or not FORCEHUB_PASSWORD:
+    if not auth_config.username or not auth_config.password:
         message = (
             "ForceHub authentication is not configured. Set FORCEHUB_USERNAME and "
-            "FORCEHUB_PASSWORD, or set FORCEHUB_AUTH_DISABLED=1 for local-only use."
+            "FORCEHUB_PASSWORD or FORCEHUB_PASSWORD_FILE, or set FORCEHUB_AUTH_DISABLED=1 for local-only use."
         )
         logger.error(message)
         return AuthResult(False, message)
@@ -252,8 +443,8 @@ def check_basic_auth(request: Request) -> AuthResult:
         if not password:
             return AuthResult(False, "Basic auth password is required")
 
-        username_matches = secrets.compare_digest(username, FORCEHUB_USERNAME)
-        password_matches = secrets.compare_digest(password, FORCEHUB_PASSWORD)
+        username_matches = secrets.compare_digest(username, auth_config.username)
+        password_matches = secrets.compare_digest(password, auth_config.password)
         if username_matches and password_matches:
             return AuthResult(True)
 
@@ -261,6 +452,24 @@ def check_basic_auth(request: Request) -> AuthResult:
     except Exception as exc:
         logger.warning("Rejected malformed Basic auth header: %s", exc)
         return AuthResult(False, "Invalid Basic auth header")
+
+
+def rate_limit_result(request: Request) -> tuple[bool, int]:
+    if RATE_LIMIT_DISABLED or request.url.path.startswith("/status"):
+        return False, 0
+
+    now = time.monotonic()
+    window_start = now - RATE_LIMIT_WINDOW_SECONDS
+    client_host = request.client.host if request.client else "unknown"
+    key = f"{client_host}:{request.url.path}"
+    bucket = RATE_LIMIT_BUCKETS[key]
+    while bucket and bucket[0] < window_start:
+        bucket.popleft()
+    if len(bucket) >= RATE_LIMIT_REQUESTS:
+        retry_after = max(1, int(RATE_LIMIT_WINDOW_SECONDS - (now - bucket[0])))
+        return True, retry_after
+    bucket.append(now)
+    return False, 0
 
 
 @app.middleware("http")
@@ -276,6 +485,18 @@ async def forcehub_basic_auth(request: Request, call_next):
             headers={"WWW-Authenticate": 'Basic realm="ForceHub"'},
         )
 
+    return await call_next(request)
+
+
+@app.middleware("http")
+async def forcehub_rate_limit(request: Request, call_next):
+    limited, retry_after = rate_limit_result(request)
+    if limited:
+        return PlainTextResponse(
+            "ForceHub rate limit exceeded",
+            status_code=429,
+            headers={"Retry-After": str(retry_after)},
+        )
     return await call_next(request)
 
 
@@ -354,6 +575,29 @@ def should_include_file(path: Path) -> bool:
     return path.suffix.lower() in allowed_ext or path.name in {"Dockerfile", ".gitignore", "CMakeLists.txt", "Makefile"}
 
 
+def iter_project_files(root: Path):
+    root = root.resolve()
+    if not root.exists() or not root.is_dir():
+        raise ValueError(f"Invalid project root: {root}")
+
+    seen: set[Path] = set()
+    for path in root.rglob("*"):
+        try:
+            if not path.is_file():
+                continue
+            resolved = path.resolve()
+        except OSError as exc:
+            logger.warning("Skipping inaccessible project file %s: %s", path, exc)
+            continue
+        if not is_relative_to(resolved, root):
+            logger.warning("Skipping project file outside root: %s", path)
+            continue
+        if resolved in seen or not should_include_file(path) or not should_include_file(resolved):
+            continue
+        seen.add(resolved)
+        yield resolved
+
+
 def read_text_limited(path: Path, max_chars: int = MAX_FILE_CHARS) -> tuple[str, bool]:
     with path.open("r", encoding="utf-8", errors="replace") as handle:
         text = handle.read(max_chars + 1)
@@ -382,8 +626,8 @@ def build_project_context(project: str) -> str:
         raise ValueError(f"Project directory is invalid: {project}")
     chunks = [f"PROJECT: {project}\nROOT: {root}\n"]
     try:
-        files = [p for p in root.rglob("*") if p.is_file() and should_include_file(p)]
-    except OSError as exc:
+        files = list(iter_project_files(root))
+    except (OSError, ValueError) as exc:
         logger.exception("Failed to scan project context for %s", root)
         raise RuntimeError(f"Unable to scan project directory: {project}") from exc
     files = sorted(files, key=lambda p: str(p.relative_to(root)))[:MAX_PROJECT_FILES]
@@ -855,7 +1099,7 @@ def list_projects():
 
 def project_file_listing(project: str, limit: int = 300) -> list[str]:
     root = safe_project_path(project)
-    files = [str(p.relative_to(root)) for p in root.rglob("*") if p.is_file() and should_include_file(p)]
+    files = [str(p.relative_to(root)) for p in iter_project_files(root)]
     return sorted(files)[:limit]
 
 
@@ -875,6 +1119,32 @@ def diff_content_response(req: DiffContentRequest) -> dict[str, str | bool]:
     diff = difflib.unified_diff(old, new, fromfile=f"a/{req.file}", tofile=f"b/{req.file}")
     text = "".join(diff)
     return {"text": text or "No changes."}
+
+
+def create_file_backup(target: Path) -> Path:
+    backup = target.with_suffix(target.suffix + f".bak-{datetime.now().strftime('%Y%m%d-%H%M%S')}")
+    try:
+        shutil.copy2(target, backup)
+    except OSError as exc:
+        logger.exception("Failed to create backup for %s at %s", target, backup)
+        raise RuntimeError(f"Unable to create backup for {target.name}") from exc
+    return backup
+
+
+def write_text_file(target: Path, content: str) -> None:
+    temp = target.with_name(f".{target.name}.tmp-{datetime.now().strftime('%Y%m%d-%H%M%S')}")
+    try:
+        temp.write_text(content, encoding="utf-8")
+        temp.replace(target)
+    except OSError as exc:
+        logger.exception("Failed to write file %s", target)
+        raise RuntimeError(f"Unable to write file: {target.name}") from exc
+    finally:
+        try:
+            if temp.exists():
+                temp.unlink()
+        except OSError as exc:
+            logger.warning("Unable to remove temporary file %s: %s", temp, exc)
 
 
 @app.get("/api/files")
@@ -907,10 +1177,10 @@ def api_save_file(req: SaveFileRequest):
     try:
         target = safe_file_path(req.project, req.file)
         if req.backup:
-            backup = target.with_suffix(target.suffix + f".bak-{datetime.now().strftime('%Y%m%d-%H%M%S')}")
-            shutil.copy2(target, backup)
-        target.write_text(req.content, encoding="utf-8")
-        return {"text": f"Saved {req.file} with backup."}
+            create_file_backup(target)
+        write_text_file(target, req.content)
+        backup_text = " with backup" if req.backup else ""
+        return {"text": f"Saved {req.file}{backup_text}."}
     except Exception as e:
         return api_error("Save file", e)
 
@@ -981,9 +1251,7 @@ def search_project_files(req: SearchRequest) -> dict[str, str]:
     root = safe_project_path(req.project)
     q = req.query.lower()
     results = []
-    for path in root.rglob("*"):
-        if not path.is_file() or not should_include_file(path):
-            continue
+    for path in iter_project_files(root):
         rel = str(path.relative_to(root))
         try:
             with path.open("r", encoding="utf-8", errors="replace") as handle:
@@ -1258,7 +1526,7 @@ def save_readme(req: SaveReadmeRequest):
     try:
         root = safe_project_path(req.project)
         readme = root / "README.md"
-        readme.write_text(req.content, encoding="utf-8")
+        write_text_file(readme, req.content)
         return {"text": f"Saved README.md to {readme}"}
     except Exception as e:
         return api_error("Save README", e)
@@ -1357,8 +1625,8 @@ def api_get_project_settings(project: str = DEFAULT_PROJECT):
     data = load_project_settings()
     return data.get(project, {
         "project": project,
-        "preferred_model": "auto",
-        "preferred_mode": "normal",
+        "preferred_model": DEFAULT_MODEL,
+        "preferred_mode": DEFAULT_MODE,
         "project_context": False,
     })
 
@@ -1391,8 +1659,8 @@ def ask_legacy(req: ChatRequest):
 def main() -> None:
     import uvicorn
 
-    host = os.getenv("FORCEHUB_HOST", "127.0.0.1")
-    port = int(os.getenv("FORCEHUB_PORT", "8000"))
+    host = env_str("FORCEHUB_HOST", "127.0.0.1")
+    port = env_int("FORCEHUB_PORT", 8000, minimum=1, maximum=65535)
     uvicorn.run("app.main:app", host=host, port=port, reload=False)
 
 
