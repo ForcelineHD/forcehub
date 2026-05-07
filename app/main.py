@@ -348,12 +348,25 @@ def should_include_file(path: Path) -> bool:
     return path.suffix.lower() in allowed_ext or path.name in {"Dockerfile", ".gitignore", "CMakeLists.txt", "Makefile"}
 
 
+def read_text_limited(path: Path, max_chars: int = MAX_FILE_CHARS) -> tuple[str, bool]:
+    with path.open("r", encoding="utf-8", errors="replace") as handle:
+        text = handle.read(max_chars + 1)
+
+    if len(text) > max_chars:
+        logger.error("File exceeds maximum read length of %s chars and was truncated: %s", max_chars, path)
+        return text[:max_chars], True
+
+    return text, False
+
+
 def read_file_safe(path: Path, root: Path) -> str:
     try:
         rel = path.relative_to(root)
-        text = path.read_text(encoding="utf-8", errors="replace")[:MAX_FILE_CHARS]
-        return f"\n\n--- FILE: {rel} ---\n{text}"
+        text, truncated = read_text_limited(path)
+        suffix = f" (truncated after {MAX_FILE_CHARS} chars)" if truncated else ""
+        return f"\n\n--- FILE: {rel}{suffix} ---\n{text}"
     except Exception as e:
+        logger.exception("Failed to read file %s", path)
         return f"\n\n--- FILE ERROR: {path.name}: {e} ---"
 
 
@@ -825,14 +838,18 @@ def api_files(project: str = DEFAULT_PROJECT):
 @app.get("/api/file-content")
 def api_file_content(project: str, file: str):
     target = safe_file_path(project, file)
-    return {"content": target.read_text(encoding="utf-8", errors="replace")}
+    content, truncated = read_text_limited(target)
+    return {"content": content, "truncated": truncated, "max_chars": MAX_FILE_CHARS}
 
 
 @app.post("/api/diff-content")
 def api_diff_content(req: DiffContentRequest):
     try:
         target = safe_file_path(req.project, req.file)
-        old = target.read_text(encoding="utf-8", errors="replace").splitlines(keepends=True)
+        old_content, truncated = read_text_limited(target)
+        if truncated:
+            return {"error": True, "text": f"Cannot diff {req.file}: file exceeds {MAX_FILE_CHARS} characters."}
+        old = old_content.splitlines(keepends=True)
         new = req.content.splitlines(keepends=True)
         diff = difflib.unified_diff(old, new, fromfile=f"a/{req.file}", tofile=f"b/{req.file}")
         text = "".join(diff)
@@ -847,7 +864,7 @@ def api_save_file(req: SaveFileRequest):
         target = safe_file_path(req.project, req.file)
         if req.backup:
             backup = target.with_suffix(target.suffix + f".bak-{datetime.now().strftime('%Y%m%d-%H%M%S')}")
-            backup.write_text(target.read_text(encoding="utf-8", errors="replace"), encoding="utf-8")
+            shutil.copy2(target, backup)
         target.write_text(req.content, encoding="utf-8")
         return {"text": f"Saved {req.file} with backup."}
     except Exception as e:
