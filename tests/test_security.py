@@ -178,6 +178,31 @@ def test_ollama_timeout_env_default_min_max_behavior(monkeypatch, env_value, exp
     assert main.OLLAMA_TIMEOUT_SECONDS == expected
 
 
+@pytest.mark.parametrize(
+    ("chunk_chars", "max_chunks", "expected_chunk_chars", "expected_max_chunks"),
+    [
+        (None, None, 8000, 8),
+        ("", "", 8000, 8),
+        ("2000", "1", 2000, 1),
+        ("20000", "20", 20000, 20),
+        ("1999", "0", 8000, 8),
+        ("20001", "21", 8000, 8),
+        ("bad", "bad", 8000, 8),
+    ],
+)
+def test_review_chunk_env_default_min_max_behavior(monkeypatch, chunk_chars, max_chunks, expected_chunk_chars, expected_max_chunks):
+    env = {"FORCEHUB_AUTH_DISABLED": "1"}
+    if chunk_chars is not None:
+        env["FORCEHUB_REVIEW_CHUNK_CHARS"] = chunk_chars
+    if max_chunks is not None:
+        env["FORCEHUB_REVIEW_MAX_CHUNKS"] = max_chunks
+
+    main = import_main(monkeypatch, env)
+
+    assert main.REVIEW_CHUNK_CHARS == expected_chunk_chars
+    assert main.REVIEW_MAX_CHUNKS == expected_max_chunks
+
+
 def test_empty_env_path_values_fall_back(monkeypatch):
     main = import_main(
         monkeypatch,
@@ -351,15 +376,15 @@ def test_large_file_truncation_warning_is_prompted_logged_and_returned(monkeypat
     main = import_main(monkeypatch, app_env(tmp_path, projects_dir))
     large_file = project_dir / "large.py"
     large_file.write_text("x" * (main.MAX_FILE_CHARS + 20), encoding="utf-8")
-    captured = {}
+    prompts = []
 
     def fake_ask(prompt, model):
-        captured["prompt"] = prompt
-        return "Evidence: checked provided partial file.", "mock-model", 0.01
+        prompts.append(prompt)
+        return main.NO_CONFIRMED_ISSUE, "mock-model", 0.01
 
     monkeypatch.setattr(main, "ask_with_fallback", fake_ask)
 
-    with caplog.at_level(logging.ERROR, logger=main.APP_NAME):
+    with caplog.at_level(logging.WARNING, logger=main.APP_NAME):
         response = TestClient(main.app).post(
             "/api/file-action",
             json={"project": "proj", "file": "large.py", "action": "review"},
@@ -369,11 +394,101 @@ def test_large_file_truncation_warning_is_prompted_logged_and_returned(monkeypat
     assert response.status_code == 200
     assert warning_text.startswith(main.TRUNCATION_WARNING_PREFIX)
     assert "large.py" in warning_text
-    assert str(main.MAX_FILE_CHARS) in warning_text
-    assert "model only saw partial file content" in warning_text
-    assert warning_text in captured["prompt"]
+    assert str(main.REVIEW_CHUNK_CHARS) in warning_text
+    assert "chunked review" in warning_text
+    assert len(prompts) == 2
+    assert all(warning_text in prompt for prompt in prompts)
+    assert response.json()["text"].endswith(main.NO_CONFIRMED_ISSUE)
     assert "large.py" in caplog.text
-    assert "model only saw partial file content" in caplog.text
+    assert "chunked review" in caplog.text
+
+
+def test_large_file_review_splits_into_chunks(monkeypatch, tmp_path):
+    projects_dir, project_dir = create_project(tmp_path)
+    env = app_env(tmp_path, projects_dir) | {
+        "FORCEHUB_REVIEW_CHUNK_CHARS": "2000",
+        "FORCEHUB_REVIEW_MAX_CHUNKS": "8",
+    }
+    main = import_main(monkeypatch, env)
+    large_file = project_dir / "large.py"
+    large_file.write_text("a" * 4500, encoding="utf-8")
+    prompts = []
+
+    def fake_ask(prompt, model):
+        prompts.append(prompt)
+        return f"Location: large.py:{len(prompts)}\nEvidence: confirmed issue in chunk {len(prompts)}.", "mock-model", 0.01
+
+    monkeypatch.setattr(main, "ask_with_fallback", fake_ask)
+    response = TestClient(main.app).post(
+        "/api/file-action",
+        json={"project": "proj", "file": "large.py", "action": "bugs"},
+    )
+    text = response.json()["text"]
+
+    assert response.status_code == 200
+    assert len(prompts) == 3
+    assert "Chunk: 1 of 3" in prompts[0]
+    assert "Character range: 0-2000" in prompts[0]
+    assert "Chunk: 2 of 3" in prompts[1]
+    assert "Character range: 2000-4000" in prompts[1]
+    assert "Chunk: 3 of 3" in prompts[2]
+    assert "Character range: 4000-4500" in prompts[2]
+    assert text.count("confirmed issue in chunk") == 3
+    assert "Chunk 1 (0-2000)" in text
+    assert "Chunk 3 (4000-4500)" in text
+
+
+def test_large_file_review_respects_max_chunk_limit(monkeypatch, tmp_path):
+    projects_dir, project_dir = create_project(tmp_path)
+    env = app_env(tmp_path, projects_dir) | {
+        "FORCEHUB_REVIEW_CHUNK_CHARS": "2000",
+        "FORCEHUB_REVIEW_MAX_CHUNKS": "2",
+    }
+    main = import_main(monkeypatch, env)
+    large_file = project_dir / "large.py"
+    large_file.write_text("a" * 5000, encoding="utf-8")
+    prompts = []
+
+    def fake_ask(prompt, model):
+        prompts.append(prompt)
+        return main.NO_CONFIRMED_ISSUE, "mock-model", 0.01
+
+    monkeypatch.setattr(main, "ask_with_fallback", fake_ask)
+    response = TestClient(main.app).post(
+        "/api/file-action",
+        json={"project": "proj", "file": "large.py", "action": "review"},
+    )
+    text = response.json()["text"]
+
+    assert response.status_code == 200
+    assert len(prompts) == 2
+    assert "Chunk: 1 of 2" in prompts[0]
+    assert "Chunk: 2 of 2" in prompts[1]
+    assert "Only the first 2 chunk(s) were reviewed" in text
+    assert text.endswith(main.NO_CONFIRMED_ISSUE)
+
+
+def test_chunked_review_suppresses_generic_no_issue_output(monkeypatch, tmp_path):
+    projects_dir, project_dir = create_project(tmp_path)
+    env = app_env(tmp_path, projects_dir) | {"FORCEHUB_REVIEW_CHUNK_CHARS": "2000"}
+    main = import_main(monkeypatch, env)
+    large_file = project_dir / "large.py"
+    large_file.write_text("a" * 4500, encoding="utf-8")
+
+    def fake_ask(prompt, model):
+        return "Security Concerns\n- Review validation.\n\nRecommendations\n- Improve error handling.", "mock-model", 0.01
+
+    monkeypatch.setattr(main, "ask_with_fallback", fake_ask)
+    response = TestClient(main.app).post(
+        "/api/file-action",
+        json={"project": "proj", "file": "large.py", "action": "bugs"},
+    )
+    text = response.json()["text"]
+
+    assert response.status_code == 200
+    assert "Security Concerns" not in text
+    assert "Recommendations" not in text
+    assert text.endswith(main.NO_CONFIRMED_ISSUE)
 
 
 def test_bugs_and_review_prompts_are_confirmed_only(monkeypatch, tmp_path):
