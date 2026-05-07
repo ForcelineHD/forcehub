@@ -144,6 +144,22 @@ OLLAMA_TIMEOUT_SECONDS = env_int("FORCEHUB_OLLAMA_TIMEOUT_SECONDS", 180, minimum
 VALID_MODES = {"normal", "code", "cpp", "short", "explain"}
 SAFE_DEFAULT_MODEL = "qwen2.5-coder:3b"
 OLLAMA_FALLBACK_MODEL = "qwen2.5-coder:1.5b"
+NO_CONFIRMED_ISSUE = "No confirmed remaining issue found."
+CONFIRMED_AUDIT_RULES = f"""Confirmed-only audit rules:
+- Only confirmed issues.
+- No generic best-practice lists.
+- No style, documentation, formatting, or comment suggestions.
+- Must cite exact function/location/evidence for every finding.
+- Do not infer missing context from framework conventions or assumptions.
+- If no confirmed issue exists, output exactly:
+{NO_CONFIRMED_ISSUE}
+"""
+GENERIC_AUDIT_SECTIONS = (
+    "security concerns",
+    "code readability",
+    "documentation",
+    "recommendations",
+)
 
 
 def configured_default_model() -> str:
@@ -898,6 +914,44 @@ def format_ollama_timeout_message(selected_model: str, fallback_model: str | Non
         f"Timeout: {timeout_seconds} seconds\n"
         "Result: No analysis was generated because the Ollama request timed out."
     )
+
+
+def build_confirmed_audit_prompt(scope: str, task: str, label: str, content: str) -> str:
+    return f"""You are ForceHub AI confirmed-only reviewer.
+
+Review scope: {scope}
+
+Task:
+{task}
+
+{CONFIRMED_AUDIT_RULES}
+
+{label}:
+{content}
+"""
+
+
+def audit_answer_has_exact_evidence(answer: str) -> bool:
+    evidence_pattern = r"(?im)\b(file|function|location|line|evidence)\b\s*[:\-]"
+    path_line_pattern = r"(?m)\b[\w./\\-]+:\d+\b"
+    function_pattern = r"(?m)\b[A-Za-z_][A-Za-z0-9_]*\(\)"
+    return bool(
+        re.search(evidence_pattern, answer)
+        or re.search(path_line_pattern, answer)
+        or re.search(function_pattern, answer)
+    )
+
+
+def clean_confirmed_audit_answer(answer: str) -> str:
+    text = answer.strip()
+    if not text:
+        return NO_CONFIRMED_ISSUE
+    lower = text.casefold()
+    has_generic_section = any(section in lower for section in GENERIC_AUDIT_SECTIONS)
+    if has_generic_section and not audit_answer_has_exact_evidence(text):
+        logger.warning("Converted generic audit response without exact evidence into no confirmed issue")
+        return NO_CONFIRMED_ISSUE
+    return text
 
 
 def save_chat(role: str, content: str) -> None:
@@ -1655,8 +1709,13 @@ def project_action(req: ProjectActionRequest):
             "readme": "Write a professional GitHub README for this project.",
             "commit": "Generate a clean commit message and short changelog.",
         }
-        final_prompt = f"You are ForceHub AI project reviewer.\n\nTask:\n{prompts[req.action]}\n\nProject context:\n{context}\n"
+        if req.action == "bugs":
+            final_prompt = build_confirmed_audit_prompt("project", prompts[req.action], "Project context", context)
+        else:
+            final_prompt = f"You are ForceHub AI project reviewer.\n\nTask:\n{prompts[req.action]}\n\nProject context:\n{context}\n"
         answer, used_model, elapsed = ask_with_fallback(final_prompt, req.model)
+        if req.action == "bugs":
+            answer = clean_confirmed_audit_answer(answer)
         LAST_DEBUG.update({"model": used_model, "elapsed": elapsed, "action": req.action})
         return {"text": answer, "action": req.action, "model": used_model}
     except Exception as e:
@@ -1685,13 +1744,18 @@ def file_action(req: FileReviewRequest):
         file_path = safe_file_path(req.project, req.file)
         content = read_file_safe(file_path, root)
         prompts = {
-            "review": "Review this file. Give practical improvements only.",
-            "bugs": "Find likely bugs, security issues, and weak design choices in this file.",
+            "review": "Review this file for confirmed bugs, security issues, and reliability problems.",
+            "bugs": "Find confirmed bugs, security issues, and reliability problems in this file.",
             "explain": "Explain what this file does clearly.",
             "patch": "Suggest a safe patch. Do not apply it. Show replacement code blocks only.",
         }
-        final_prompt = f"You are ForceHub AI file reviewer.\n\nTask:\n{prompts[req.action]}\n\nFile content:\n{content}\n"
+        if req.action in {"review", "bugs"}:
+            final_prompt = build_confirmed_audit_prompt("file", prompts[req.action], "File content", content)
+        else:
+            final_prompt = f"You are ForceHub AI file reviewer.\n\nTask:\n{prompts[req.action]}\n\nFile content:\n{content}\n"
         answer, used_model, elapsed = ask_with_fallback(final_prompt, req.model)
+        if req.action in {"review", "bugs"}:
+            answer = clean_confirmed_audit_answer(answer)
         LAST_DEBUG.update({"model": used_model, "elapsed": elapsed, "action": f"file_{req.action}"})
         return {"text": answer, "file": req.file, "action": req.action, "model": used_model}
     except Exception as e:
