@@ -16,6 +16,7 @@ from typing import Literal
 
 import requests
 from fastapi import FastAPI, Request
+from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import HTMLResponse, PlainTextResponse, StreamingResponse
 from pydantic import BaseModel
 
@@ -852,32 +853,51 @@ def list_projects():
     return {"projects": list_project_names(), "default_project": DEFAULT_PROJECT}
 
 
-@app.get("/api/files")
-def api_files(project: str = DEFAULT_PROJECT):
+def project_file_listing(project: str, limit: int = 300) -> list[str]:
     root = safe_project_path(project)
     files = [str(p.relative_to(root)) for p in root.rglob("*") if p.is_file() and should_include_file(p)]
-    return {"files": sorted(files)[:300]}
+    return sorted(files)[:limit]
 
 
-@app.get("/api/file-content")
-def api_file_content(project: str, file: str):
+def file_content_response(project: str, file: str) -> dict[str, str | int | bool]:
     target = safe_file_path(project, file)
     content, truncated = read_text_limited(target)
     return {"content": content, "truncated": truncated, "max_chars": MAX_FILE_CHARS}
 
 
-@app.post("/api/diff-content")
-def api_diff_content(req: DiffContentRequest):
+def diff_content_response(req: DiffContentRequest) -> dict[str, str | bool]:
+    target = safe_file_path(req.project, req.file)
+    old_content, truncated = read_text_limited(target)
+    if truncated:
+        return {"error": True, "text": f"Cannot diff {req.file}: file exceeds {MAX_FILE_CHARS} characters."}
+    old = old_content.splitlines(keepends=True)
+    new = req.content.splitlines(keepends=True)
+    diff = difflib.unified_diff(old, new, fromfile=f"a/{req.file}", tofile=f"b/{req.file}")
+    text = "".join(diff)
+    return {"text": text or "No changes."}
+
+
+@app.get("/api/files")
+async def api_files(project: str = DEFAULT_PROJECT):
     try:
-        target = safe_file_path(req.project, req.file)
-        old_content, truncated = read_text_limited(target)
-        if truncated:
-            return {"error": True, "text": f"Cannot diff {req.file}: file exceeds {MAX_FILE_CHARS} characters."}
-        old = old_content.splitlines(keepends=True)
-        new = req.content.splitlines(keepends=True)
-        diff = difflib.unified_diff(old, new, fromfile=f"a/{req.file}", tofile=f"b/{req.file}")
-        text = "".join(diff)
-        return {"text": text or "No changes."}
+        files = await run_in_threadpool(project_file_listing, project)
+        return {"files": files}
+    except Exception as e:
+        return api_error("List files", e)
+
+
+@app.get("/api/file-content")
+async def api_file_content(project: str, file: str):
+    try:
+        return await run_in_threadpool(file_content_response, project, file)
+    except Exception as e:
+        return api_error("Read file content", e)
+
+
+@app.post("/api/diff-content")
+async def api_diff_content(req: DiffContentRequest):
+    try:
+        return await run_in_threadpool(diff_content_response, req)
     except Exception as e:
         return api_error("Diff preview", e)
 
@@ -957,24 +977,33 @@ def reset_chat():
     return {"status": "cleared"}
 
 
+def search_project_files(req: SearchRequest) -> dict[str, str]:
+    root = safe_project_path(req.project)
+    q = req.query.lower()
+    results = []
+    for path in root.rglob("*"):
+        if not path.is_file() or not should_include_file(path):
+            continue
+        rel = str(path.relative_to(root))
+        try:
+            with path.open("r", encoding="utf-8", errors="replace") as handle:
+                for line_number, line in enumerate(handle, start=1):
+                    if q in line.lower():
+                        results.append(f"{rel}:{line_number}: {line.strip()}")
+                        if len(results) >= MAX_SEARCH_RESULTS:
+                            break
+        except OSError as exc:
+            logger.warning("Skipping unreadable file during search %s: %s", path, exc)
+            continue
+        if len(results) >= MAX_SEARCH_RESULTS:
+            break
+    return {"text": "\n".join(results) if results else "No results found."}
+
+
 @app.post("/api/search")
-def api_search(req: SearchRequest):
+async def api_search(req: SearchRequest):
     try:
-        root = safe_project_path(req.project)
-        q = req.query.lower()
-        results = []
-        for path in root.rglob("*"):
-            if not path.is_file() or not should_include_file(path):
-                continue
-            rel = str(path.relative_to(root))
-            for i, line in enumerate(path.read_text(encoding="utf-8", errors="replace").splitlines(), start=1):
-                if q in line.lower():
-                    results.append(f"{rel}:{i}: {line.strip()}")
-                    if len(results) >= MAX_SEARCH_RESULTS:
-                        break
-            if len(results) >= MAX_SEARCH_RESULTS:
-                break
-        return {"text": "\n".join(results) if results else "No results found."}
+        return await run_in_threadpool(search_project_files, req)
     except Exception as e:
         return api_error("Search", e)
 
