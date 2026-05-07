@@ -202,8 +202,17 @@ class ProjectSettingsRequest(BaseModel):
     project_context: bool = False
 
 
-def ensure_dir(path: Path) -> None:
-    path.mkdir(parents=True, exist_ok=True)
+def ensure_dir(path: Path, *, private: bool = True) -> None:
+    try:
+        path.mkdir(parents=True, exist_ok=True, mode=0o700 if private else 0o755)
+    except PermissionError as exc:
+        logger.exception("Insufficient permissions to create directory %s", path)
+        raise RuntimeError(f"Insufficient permissions to create directory: {path}") from exc
+    except OSError as exc:
+        logger.exception("Unable to create directory %s", path)
+        raise RuntimeError(f"Unable to create directory: {path}") from exc
+    if not path.is_dir():
+        raise RuntimeError(f"Expected directory path is not a directory: {path}")
 
 
 def configure_logging() -> None:
@@ -281,9 +290,15 @@ def normalize_file_path(file: str) -> Path:
 
 
 def list_project_names() -> list[str]:
-    ensure_dir(PROJECTS_DIR)
+    ensure_dir(PROJECTS_DIR, private=False)
     projects = []
-    for path in PROJECTS_DIR.iterdir():
+    try:
+        candidates = list(PROJECTS_DIR.iterdir())
+    except OSError as exc:
+        logger.exception("Unable to list configured projects directory %s", PROJECTS_DIR)
+        raise RuntimeError(f"Unable to list projects directory: {PROJECTS_DIR}") from exc
+
+    for path in candidates:
         if not path.is_dir():
             continue
         try:
@@ -292,8 +307,10 @@ def list_project_names() -> list[str]:
         except (OSError, ValueError) as exc:
             logger.warning("Skipping invalid project directory %s: %s", path, exc)
             continue
-        if is_relative_to(resolved, PROJECTS_DIR):
+        if is_relative_to(resolved, PROJECTS_DIR) and os.access(resolved, os.R_OK | os.X_OK):
             projects.append(normalized)
+        else:
+            logger.warning("Skipping inaccessible or out-of-root project directory %s", path)
     return sorted(projects)
 
 
