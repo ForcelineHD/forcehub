@@ -8,3 +8,8 @@ __pycache__/
 *.pyc
 .env
 .pytest_cache/
+
+# Runtime local data
+data/chats.json
+data/project_cache.json
+data/project_settings.json
