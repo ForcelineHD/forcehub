@@ -140,8 +140,10 @@ OLLAMA_TAGS_URL = validate_ollama_endpoint(
     "FORCEHUB_OLLAMA_TAGS_URL",
     OLLAMA_BASE_URL,
 )
+OLLAMA_TIMEOUT_SECONDS = env_int("FORCEHUB_OLLAMA_TIMEOUT_SECONDS", 180, minimum=10, maximum=600)
 VALID_MODES = {"normal", "code", "cpp", "short", "explain"}
 SAFE_DEFAULT_MODEL = "qwen2.5-coder:3b"
+OLLAMA_FALLBACK_MODEL = "qwen2.5-coder:1.5b"
 
 
 def configured_default_model() -> str:
@@ -782,6 +784,13 @@ def choose_model(model: str, prompt: str) -> str:
     return "qwen2.5-coder:1.5b" if len(prompt) < 1200 else "qwen2.5-coder:7b"
 
 
+class OllamaTimeoutError(RuntimeError):
+    def __init__(self, model: str, timeout_seconds: int):
+        super().__init__(f"Ollama model {model} timed out after {timeout_seconds} seconds")
+        self.model = model
+        self.timeout_seconds = timeout_seconds
+
+
 def build_prompt(user_prompt: str, mode: str, project: str, project_mode: bool) -> str:
     system = {
         "normal": "You are ForceHub AI. Answer clearly and practically.",
@@ -815,16 +824,19 @@ Assistant:"""
 def ask_ollama(prompt: str, model: str) -> tuple[str, str, float]:
     selected_model = choose_model(model, prompt)
     start = time.time()
-    r = requests.post(
-        OLLAMA_GENERATE_URL,
-        json={
-            "model": selected_model,
-            "prompt": prompt,
-            "stream": False,
-            "options": {"temperature": 0.2, "top_p": 0.9, "num_ctx": 4096},
-        },
-        timeout=180,
-    )
+    try:
+        r = requests.post(
+            OLLAMA_GENERATE_URL,
+            json={
+                "model": selected_model,
+                "prompt": prompt,
+                "stream": False,
+                "options": {"temperature": 0.2, "top_p": 0.9, "num_ctx": 4096},
+            },
+            timeout=OLLAMA_TIMEOUT_SECONDS,
+        )
+    except requests.exceptions.Timeout as exc:
+        raise OllamaTimeoutError(selected_model, OLLAMA_TIMEOUT_SECONDS) from exc
     elapsed = round(time.time() - start, 2)
     if r.status_code != 200:
         raise RuntimeError(f"Ollama error {r.status_code}: {r.text}")
@@ -832,11 +844,60 @@ def ask_ollama(prompt: str, model: str) -> tuple[str, str, float]:
 
 
 def ask_with_fallback(prompt: str, model: str) -> tuple[str, str, float]:
+    selected_model = choose_model(model, prompt)
+    start = time.time()
     try:
         return ask_ollama(prompt, model)
+    except OllamaTimeoutError as exc:
+        if exc.model == OLLAMA_FALLBACK_MODEL:
+            return format_ollama_timeout_message(exc.model, None, exc.timeout_seconds), exc.model, round(time.time() - start, 2)
+        logger.warning("Ollama request timed out for model %s, retrying fallback model %s", exc.model, OLLAMA_FALLBACK_MODEL)
+        try:
+            answer, used_model, _elapsed = ask_ollama(prompt, OLLAMA_FALLBACK_MODEL)
+            notice = (
+                f"[ForceHub notice] Selected model {exc.model} timed out after {exc.timeout_seconds} seconds. "
+                f"Fallback model {used_model} was used.\n\n"
+            )
+            return notice + answer, used_model, round(time.time() - start, 2)
+        except OllamaTimeoutError as fallback_exc:
+            logger.warning("Fallback Ollama model %s also timed out", fallback_exc.model)
+            return (
+                format_ollama_timeout_message(exc.model, fallback_exc.model, fallback_exc.timeout_seconds),
+                fallback_exc.model,
+                round(time.time() - start, 2),
+            )
     except Exception as exc:
-        logger.warning("Ollama request failed for model %s, retrying fallback model: %s", model, exc)
-        return ask_ollama(prompt, "qwen2.5-coder:1.5b")
+        if selected_model == OLLAMA_FALLBACK_MODEL:
+            raise
+        logger.warning("Ollama request failed for model %s, retrying fallback model %s: %s", selected_model, OLLAMA_FALLBACK_MODEL, exc)
+        try:
+            answer, used_model, _elapsed = ask_ollama(prompt, OLLAMA_FALLBACK_MODEL)
+        except OllamaTimeoutError as fallback_exc:
+            logger.warning("Fallback Ollama model %s timed out after primary failure", fallback_exc.model)
+            return (
+                format_ollama_timeout_message(selected_model, fallback_exc.model, fallback_exc.timeout_seconds),
+                fallback_exc.model,
+                round(time.time() - start, 2),
+            )
+        notice = f"[ForceHub notice] Selected model {selected_model} failed. Fallback model {used_model} was used.\n\n"
+        return notice + answer, used_model, round(time.time() - start, 2)
+
+
+def format_ollama_timeout_message(selected_model: str, fallback_model: str | None, timeout_seconds: int) -> str:
+    if fallback_model:
+        return (
+            "[ForceHub timeout]\n"
+            f"Selected model: {selected_model}\n"
+            f"Fallback model: {fallback_model}\n"
+            f"Timeout: {timeout_seconds} seconds\n"
+            "Result: No analysis was generated because both Ollama requests timed out."
+        )
+    return (
+        "[ForceHub timeout]\n"
+        f"Selected model: {selected_model}\n"
+        f"Timeout: {timeout_seconds} seconds\n"
+        "Result: No analysis was generated because the Ollama request timed out."
+    )
 
 
 def save_chat(role: str, content: str) -> None:
@@ -1341,12 +1402,12 @@ DIFF:
 @app.get("/api/models")
 def api_models():
     try:
-        r = requests.get(OLLAMA_TAGS_URL, timeout=10)
+        r = requests.get(OLLAMA_TAGS_URL, timeout=OLLAMA_TIMEOUT_SECONDS)
         r.raise_for_status()
         return {"models": [m["name"] for m in r.json().get("models", [])]}
     except Exception as exc:
         logger.warning("Failed to load Ollama models, returning fallback models: %s", exc)
-        return {"models": ["qwen2.5-coder:7b", "qwen2.5-coder:1.5b"]}
+        return {"models": ["qwen2.5-coder:7b", OLLAMA_FALLBACK_MODEL]}
 
 
 @app.get("/api/debug")
@@ -1555,7 +1616,7 @@ def api_chat_stream(req: ChatRequest):
                     "options": {"temperature": 0.2, "top_p": 0.9, "num_ctx": 4096},
                 },
                 stream=True,
-                timeout=180,
+                timeout=OLLAMA_TIMEOUT_SECONDS,
             ) as r:
                 r.raise_for_status()
                 for line in r.iter_lines():
@@ -1574,6 +1635,9 @@ def api_chat_stream(req: ChatRequest):
             save_chat("assistant", full)
             LAST_DEBUG.update({"model": selected_model, "elapsed": elapsed, "action": "chat_stream"})
 
+        except requests.exceptions.Timeout:
+            logger.warning("Chat stream timed out for model %s after %s seconds", selected_model, OLLAMA_TIMEOUT_SECONDS)
+            yield f"\n[ForceHub timeout] Ollama model {selected_model} timed out after {OLLAMA_TIMEOUT_SECONDS} seconds. No streaming response was generated."
         except Exception as e:
             logger.exception("Chat stream failed")
             yield f"\n[stream error] Chat stream failed: {e}"
