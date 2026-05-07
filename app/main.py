@@ -23,20 +23,61 @@ from pydantic import BaseModel
 
 APP_NAME = "forcehub"
 APP_VERSION = "0.8.0"
+logger = logging.getLogger(APP_NAME)
 
 BASE_DIR = Path(__file__).resolve().parent.parent
-PROJECTS_DIR = Path(os.getenv("FORCEHUB_PROJECTS_DIR", str(BASE_DIR.parent))).expanduser().resolve()
-DEFAULT_PROJECT = os.getenv("FORCEHUB_DEFAULT_PROJECT", BASE_DIR.name)
-DATA_DIR = Path(os.getenv("FORCEHUB_DATA_DIR", str(BASE_DIR / "data"))).expanduser().resolve()
+
+
+def env_bool(name: str, default: bool = False) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    normalized = raw.strip().casefold()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off", ""}:
+        return False
+    logger.warning("Invalid boolean value for %s; using default %s", name, default)
+    return default
+
+
+def env_int(name: str, default: int, *, minimum: int | None = None, maximum: int | None = None) -> int:
+    raw = os.getenv(name)
+    if raw is None or not raw.strip():
+        return default
+    try:
+        value = int(raw.strip())
+    except ValueError:
+        logger.warning("Invalid integer value for %s; using default %s", name, default)
+        return default
+    if minimum is not None and value < minimum:
+        logger.warning("%s below minimum %s; using default %s", name, minimum, default)
+        return default
+    if maximum is not None and value > maximum:
+        logger.warning("%s above maximum %s; using default %s", name, maximum, default)
+        return default
+    return value
+
+
+def env_str(name: str, default: str = "") -> str:
+    return os.getenv(name, default).strip()
+
+
+def env_path(name: str, default: Path | str) -> Path:
+    raw = env_str(name, str(default))
+    return Path(raw).expanduser().resolve()
+
+
+PROJECTS_DIR = env_path("FORCEHUB_PROJECTS_DIR", BASE_DIR.parent)
+DEFAULT_PROJECT = env_str("FORCEHUB_DEFAULT_PROJECT")
+DATA_DIR = env_path("FORCEHUB_DATA_DIR", BASE_DIR / "data")
 CHAT_FILE = DATA_DIR / "chats.json"
 PROJECT_CACHE_FILE = DATA_DIR / "project_cache.json"
 PROJECT_SETTINGS_FILE = DATA_DIR / "project_settings.json"
-FORCEHUB_USERNAME = os.getenv("FORCEHUB_USERNAME", "").strip()
-FORCEHUB_PASSWORD = os.getenv("FORCEHUB_PASSWORD", "")
-FORCEHUB_AUTH_DISABLED = os.getenv("FORCEHUB_AUTH_DISABLED", "").strip().lower() in {"1", "true", "yes", "on"}
 
-OLLAMA_GENERATE_URL = "http://127.0.0.1:11434/api/generate"
-OLLAMA_TAGS_URL = "http://127.0.0.1:11434/api/tags"
+OLLAMA_BASE_URL = env_str("FORCEHUB_OLLAMA_URL", "http://127.0.0.1:11434").rstrip("/")
+OLLAMA_GENERATE_URL = env_str("FORCEHUB_OLLAMA_GENERATE_URL", f"{OLLAMA_BASE_URL}/api/generate")
+OLLAMA_TAGS_URL = env_str("FORCEHUB_OLLAMA_TAGS_URL", f"{OLLAMA_BASE_URL}/api/tags")
 
 MAX_FILE_CHARS = 8000
 MAX_PROJECT_FILES = 15
@@ -47,7 +88,6 @@ PROJECT_NAME_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 CONTROL_CHAR_PATTERN = re.compile(r"[\x00-\x1f\x7f]")
 
 app = FastAPI(title="ForceHub", description="Local AI dev dashboard.", version=APP_VERSION)
-logger = logging.getLogger(APP_NAME)
 
 CHAT_HISTORY: list[dict[str, str]] = []
 LAST_DEBUG: dict[str, str | int | float] = {}
@@ -60,6 +100,13 @@ class AuthResult:
 
     def __bool__(self) -> bool:
         return self.ok
+
+
+@dataclass(frozen=True)
+class AuthConfig:
+    username: str
+    password: str
+    disabled: bool
 
 
 class StatusResponse(BaseModel):
@@ -244,19 +291,39 @@ def get_git_command() -> str | None:
     return resolve_executable("git")
 
 
+def read_secret_file(path: str) -> str:
+    secret_path = Path(path).expanduser().resolve()
+    try:
+        return secret_path.read_text(encoding="utf-8").strip()
+    except OSError as exc:
+        logger.error("Unable to read configured secret file %s: %s", secret_path, exc)
+        return ""
+
+
+def get_auth_config() -> AuthConfig:
+    password_file = env_str("FORCEHUB_PASSWORD_FILE")
+    password = read_secret_file(password_file) if password_file else os.getenv("FORCEHUB_PASSWORD", "")
+    return AuthConfig(
+        username=env_str("FORCEHUB_USERNAME"),
+        password=password,
+        disabled=env_bool("FORCEHUB_AUTH_DISABLED"),
+    )
+
+
 
 def is_auth_disabled() -> bool:
-    return FORCEHUB_AUTH_DISABLED
+    return get_auth_config().disabled
 
 
 def check_basic_auth(request: Request) -> AuthResult:
-    if is_auth_disabled():
+    auth_config = get_auth_config()
+    if auth_config.disabled:
         return AuthResult(True)
 
-    if not FORCEHUB_USERNAME or not FORCEHUB_PASSWORD:
+    if not auth_config.username or not auth_config.password:
         message = (
             "ForceHub authentication is not configured. Set FORCEHUB_USERNAME and "
-            "FORCEHUB_PASSWORD, or set FORCEHUB_AUTH_DISABLED=1 for local-only use."
+            "FORCEHUB_PASSWORD or FORCEHUB_PASSWORD_FILE, or set FORCEHUB_AUTH_DISABLED=1 for local-only use."
         )
         logger.error(message)
         return AuthResult(False, message)
@@ -276,8 +343,8 @@ def check_basic_auth(request: Request) -> AuthResult:
         if not password:
             return AuthResult(False, "Basic auth password is required")
 
-        username_matches = secrets.compare_digest(username, FORCEHUB_USERNAME)
-        password_matches = secrets.compare_digest(password, FORCEHUB_PASSWORD)
+        username_matches = secrets.compare_digest(username, auth_config.username)
+        password_matches = secrets.compare_digest(password, auth_config.password)
         if username_matches and password_matches:
             return AuthResult(True)
 
@@ -1436,8 +1503,8 @@ def ask_legacy(req: ChatRequest):
 def main() -> None:
     import uvicorn
 
-    host = os.getenv("FORCEHUB_HOST", "127.0.0.1")
-    port = int(os.getenv("FORCEHUB_PORT", "8000"))
+    host = env_str("FORCEHUB_HOST", "127.0.0.1")
+    port = env_int("FORCEHUB_PORT", 8000, minimum=1, maximum=65535)
     uvicorn.run("app.main:app", host=host, port=port, reload=False)
 
 
