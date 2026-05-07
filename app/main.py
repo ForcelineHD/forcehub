@@ -112,6 +112,12 @@ def validate_ollama_endpoint(value: str, name: str, base_url: str) -> str:
     return value
 
 
+def validate_model_name(value: str) -> str:
+    if not value or CONTROL_CHAR_PATTERN.search(value) or len(value) > 128:
+        raise ValueError("Invalid model name")
+    return value
+
+
 PROJECTS_DIR = env_path("FORCEHUB_PROJECTS_DIR", BASE_DIR.parent)
 DEFAULT_PROJECT = env_str("FORCEHUB_DEFAULT_PROJECT")
 DATA_DIR = env_path("FORCEHUB_DATA_DIR", BASE_DIR / "data")
@@ -134,11 +140,31 @@ OLLAMA_TAGS_URL = validate_ollama_endpoint(
     OLLAMA_BASE_URL,
 )
 VALID_MODES = {"normal", "code", "cpp", "short", "explain"}
-DEFAULT_MODEL = env_str("FORCEHUB_DEFAULT_MODEL", "qwen2.5-coder:1.5b")
-DEFAULT_MODE = env_str("FORCEHUB_DEFAULT_MODE", "normal")
-if DEFAULT_MODE not in VALID_MODES:
-    logger.warning("Invalid FORCEHUB_DEFAULT_MODE %s; using normal", DEFAULT_MODE)
-    DEFAULT_MODE = "normal"
+SAFE_DEFAULT_MODEL = "qwen2.5-coder:3b"
+
+
+def configured_default_model() -> str:
+    try:
+        return validate_model_name(env_config_value("FORCEHUB_DEFAULT_MODEL", SAFE_DEFAULT_MODEL))
+    except ValueError as exc:
+        logger.warning("Invalid FORCEHUB_DEFAULT_MODEL; using %s: %s", SAFE_DEFAULT_MODEL, exc)
+        return SAFE_DEFAULT_MODEL
+
+
+def configured_default_mode() -> str:
+    try:
+        mode = env_config_value("FORCEHUB_DEFAULT_MODE", "normal")
+    except ValueError as exc:
+        logger.warning("Invalid FORCEHUB_DEFAULT_MODE; using normal: %s", exc)
+        return "normal"
+    if mode not in VALID_MODES:
+        logger.warning("Invalid FORCEHUB_DEFAULT_MODE %s; using normal", mode)
+        return "normal"
+    return mode
+
+
+DEFAULT_MODEL = configured_default_model()
+DEFAULT_MODE = configured_default_mode()
 RATE_LIMIT_REQUESTS = env_int("FORCEHUB_RATE_LIMIT_REQUESTS", 120, minimum=1)
 RATE_LIMIT_WINDOW_SECONDS = env_int("FORCEHUB_RATE_LIMIT_WINDOW_SECONDS", 60, minimum=1)
 RATE_LIMIT_DISABLED = env_bool("FORCEHUB_RATE_LIMIT_DISABLED")
@@ -193,9 +219,7 @@ class ForceHubModel(BaseModel):
     @field_validator("model", "preferred_model", check_fields=False)
     @classmethod
     def validate_model_field(cls, value: str) -> str:
-        if not value or CONTROL_CHAR_PATTERN.search(value) or len(value) > 128:
-            raise ValueError("Invalid model name")
-        return value
+        return validate_model_name(value)
 
 
 def redact_sensitive(value: object) -> str:
