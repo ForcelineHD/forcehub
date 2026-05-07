@@ -16,6 +16,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path, PurePosixPath
 from typing import Literal
+from urllib.parse import urlparse
 
 import requests
 from fastapi import FastAPI, Request
@@ -28,6 +29,8 @@ APP_VERSION = "0.8.0"
 logger = logging.getLogger(APP_NAME)
 
 BASE_DIR = Path(__file__).resolve().parent.parent
+PROJECT_NAME_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+CONTROL_CHAR_PATTERN = re.compile(r"[\x00-\x1f\x7f]")
 
 
 def env_bool(name: str, default: bool = False) -> bool:
@@ -70,6 +73,38 @@ def env_path(name: str, default: Path | str) -> Path:
     return Path(raw).expanduser().resolve()
 
 
+def env_config_value(name: str, default: str) -> str:
+    raw = os.getenv(name)
+    if raw is None or not raw.strip():
+        return default
+    value = raw.strip()
+    if CONTROL_CHAR_PATTERN.search(value):
+        raise ValueError(f"{name} contains control characters")
+    return value
+
+
+def validate_absolute_http_url(value: str, name: str) -> str:
+    parsed = urlparse(value)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        raise ValueError(f"{name} must be an absolute http(s) URL")
+    return value.rstrip("/")
+
+
+def validate_ollama_endpoint(value: str, name: str, base_url: str) -> str:
+    if CONTROL_CHAR_PATTERN.search(value):
+        raise ValueError(f"{name} contains control characters")
+    if value.startswith("/"):
+        path = PurePosixPath(value)
+        if value.startswith("//") or "\\" in value or any(part in {".", ".."} for part in path.parts):
+            raise ValueError(f"{name} must be a safe relative path")
+        return f"{base_url}{value}"
+
+    parsed = urlparse(value)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        raise ValueError(f"{name} must be an absolute http(s) URL or a relative path starting with /")
+    return value
+
+
 PROJECTS_DIR = env_path("FORCEHUB_PROJECTS_DIR", BASE_DIR.parent)
 DEFAULT_PROJECT = env_str("FORCEHUB_DEFAULT_PROJECT")
 DATA_DIR = env_path("FORCEHUB_DATA_DIR", BASE_DIR / "data")
@@ -77,9 +112,20 @@ CHAT_FILE = DATA_DIR / "chats.json"
 PROJECT_CACHE_FILE = DATA_DIR / "project_cache.json"
 PROJECT_SETTINGS_FILE = DATA_DIR / "project_settings.json"
 
-OLLAMA_BASE_URL = env_str("FORCEHUB_OLLAMA_URL", "http://127.0.0.1:11434").rstrip("/")
-OLLAMA_GENERATE_URL = env_str("FORCEHUB_OLLAMA_GENERATE_URL", f"{OLLAMA_BASE_URL}/api/generate")
-OLLAMA_TAGS_URL = env_str("FORCEHUB_OLLAMA_TAGS_URL", f"{OLLAMA_BASE_URL}/api/tags")
+OLLAMA_BASE_URL = validate_absolute_http_url(
+    env_config_value("FORCEHUB_OLLAMA_URL", "http://127.0.0.1:11434"),
+    "FORCEHUB_OLLAMA_URL",
+)
+OLLAMA_GENERATE_URL = validate_ollama_endpoint(
+    env_config_value("FORCEHUB_OLLAMA_GENERATE_URL", f"{OLLAMA_BASE_URL}/api/generate"),
+    "FORCEHUB_OLLAMA_GENERATE_URL",
+    OLLAMA_BASE_URL,
+)
+OLLAMA_TAGS_URL = validate_ollama_endpoint(
+    env_config_value("FORCEHUB_OLLAMA_TAGS_URL", f"{OLLAMA_BASE_URL}/api/tags"),
+    "FORCEHUB_OLLAMA_TAGS_URL",
+    OLLAMA_BASE_URL,
+)
 VALID_MODES = {"normal", "code", "cpp", "short", "explain"}
 DEFAULT_MODEL = env_str("FORCEHUB_DEFAULT_MODEL", "qwen2.5-coder:1.5b")
 DEFAULT_MODE = env_str("FORCEHUB_DEFAULT_MODE", "normal")
@@ -95,8 +141,6 @@ MAX_PROJECT_FILES = 15
 MAX_SEARCH_RESULTS = 80
 CPP_SOURCE_PATTERNS = ("*.cpp", "*.cc", "*.cxx")
 CPP_HEADER_PATTERNS = ("*.h", "*.hh", "*.hpp", "*.hxx")
-PROJECT_NAME_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
-CONTROL_CHAR_PATTERN = re.compile(r"[\x00-\x1f\x7f]")
 SENSITIVE_LOG_PATTERN = re.compile(
     r"(?i)(authorization\s*[:=]\s*(?:basic|bearer)\s+)[^\s,;]+"
     r"|((?:password|passwd|pwd|token|secret|api[_-]?key)\s*[:=]\s*)[^\s,;]+"
