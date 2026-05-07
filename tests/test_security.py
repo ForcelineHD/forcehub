@@ -1,4 +1,5 @@
 import importlib
+import logging
 import os
 import sys
 from pathlib import Path
@@ -154,6 +155,29 @@ def test_ollama_url_empty_values_fallback_and_invalid_values_reject(monkeypatch)
         import_main(monkeypatch, {"FORCEHUB_OLLAMA_GENERATE_URL": "api/generate"})
 
 
+@pytest.mark.parametrize(
+    ("env_value", "expected"),
+    [
+        (None, 180),
+        ("", 180),
+        ("  ", 180),
+        ("10", 10),
+        ("600", 600),
+        ("9", 180),
+        ("601", 180),
+        ("bad", 180),
+    ],
+)
+def test_ollama_timeout_env_default_min_max_behavior(monkeypatch, env_value, expected):
+    env = {"FORCEHUB_AUTH_DISABLED": "1"}
+    if env_value is not None:
+        env["FORCEHUB_OLLAMA_TIMEOUT_SECONDS"] = env_value
+
+    main = import_main(monkeypatch, env)
+
+    assert main.OLLAMA_TIMEOUT_SECONDS == expected
+
+
 def test_empty_env_path_values_fall_back(monkeypatch):
     main = import_main(
         monkeypatch,
@@ -236,3 +260,167 @@ def test_chat_endpoint_uses_mocked_ollama_request(monkeypatch, tmp_path):
     assert response.status_code == 200
     assert response.json()["text"] == "mocked response"
     assert calls[0][0] == main.OLLAMA_GENERATE_URL
+    assert calls[0][1]["timeout"] == main.OLLAMA_TIMEOUT_SECONDS
+
+
+def test_chat_stream_uses_configured_ollama_timeout(monkeypatch, tmp_path):
+    projects_dir, _ = create_project(tmp_path)
+    env = app_env(tmp_path, projects_dir) | {"FORCEHUB_OLLAMA_TIMEOUT_SECONDS": "11"}
+    main = import_main(monkeypatch, env)
+    calls = []
+
+    class FakeStreamResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, traceback):
+            return False
+
+        def raise_for_status(self):
+            return None
+
+        def iter_lines(self):
+            return iter([b'{"response":"streamed"}'])
+
+    def fake_post(url, **kwargs):
+        calls.append((url, kwargs))
+        return FakeStreamResponse()
+
+    monkeypatch.setattr(main.requests, "post", fake_post)
+    response = TestClient(main.app).post("/api/chat-stream", json={"project": "proj", "prompt": "hello"})
+
+    assert response.status_code == 200
+    assert response.text == "streamed"
+    assert calls[0][0] == main.OLLAMA_GENERATE_URL
+    assert calls[0][1]["timeout"] == 11
+    assert calls[0][1]["stream"] is True
+    assert calls[0][1]["json"]["stream"] is True
+
+
+def test_ollama_timeout_uses_labeled_fallback(monkeypatch):
+    main = import_main(monkeypatch, {"FORCEHUB_AUTH_DISABLED": "1", "FORCEHUB_OLLAMA_TIMEOUT_SECONDS": "10"})
+    calls = []
+
+    class FakeResponse:
+        status_code = 200
+        text = "ok"
+
+        def json(self):
+            return {"response": "fallback response"}
+
+    def fake_post(url, **kwargs):
+        model = kwargs["json"]["model"]
+        calls.append(model)
+        if model == "qwen2.5-coder:7b":
+            raise main.requests.exceptions.Timeout()
+        return FakeResponse()
+
+    monkeypatch.setattr(main.requests, "post", fake_post)
+    answer, used_model, elapsed = main.ask_with_fallback("review", "qwen2.5-coder:7b")
+
+    assert calls == ["qwen2.5-coder:7b", main.OLLAMA_FALLBACK_MODEL]
+    assert used_model == main.OLLAMA_FALLBACK_MODEL
+    assert elapsed >= 0
+    assert "Selected model qwen2.5-coder:7b timed out after 10 seconds" in answer
+    assert f"Fallback model {main.OLLAMA_FALLBACK_MODEL} was used" in answer
+    assert "fallback response" in answer
+
+
+def test_ollama_timeout_returns_structured_error_when_fallback_times_out(monkeypatch):
+    main = import_main(monkeypatch, {"FORCEHUB_AUTH_DISABLED": "1", "FORCEHUB_OLLAMA_TIMEOUT_SECONDS": "10"})
+    calls = []
+
+    def fake_post(url, **kwargs):
+        calls.append(kwargs["json"]["model"])
+        raise main.requests.exceptions.Timeout()
+
+    monkeypatch.setattr(main.requests, "post", fake_post)
+    answer, used_model, elapsed = main.ask_with_fallback("review", "qwen2.5-coder:7b")
+
+    assert calls == ["qwen2.5-coder:7b", main.OLLAMA_FALLBACK_MODEL]
+    assert used_model == main.OLLAMA_FALLBACK_MODEL
+    assert elapsed >= 0
+    assert answer.startswith("[ForceHub timeout]")
+    assert "Selected model: qwen2.5-coder:7b" in answer
+    assert f"Fallback model: {main.OLLAMA_FALLBACK_MODEL}" in answer
+    assert "both Ollama requests timed out" in answer
+
+
+def test_large_file_truncation_warning_is_prompted_logged_and_returned(monkeypatch, tmp_path, caplog):
+    projects_dir, project_dir = create_project(tmp_path)
+    main = import_main(monkeypatch, app_env(tmp_path, projects_dir))
+    large_file = project_dir / "large.py"
+    large_file.write_text("x" * (main.MAX_FILE_CHARS + 20), encoding="utf-8")
+    captured = {}
+
+    def fake_ask(prompt, model):
+        captured["prompt"] = prompt
+        return "Evidence: checked provided partial file.", "mock-model", 0.01
+
+    monkeypatch.setattr(main, "ask_with_fallback", fake_ask)
+
+    with caplog.at_level(logging.ERROR, logger=main.APP_NAME):
+        response = TestClient(main.app).post(
+            "/api/file-action",
+            json={"project": "proj", "file": "large.py", "action": "review"},
+        )
+
+    warning_text = response.json()["text"].splitlines()[0]
+    assert response.status_code == 200
+    assert warning_text.startswith(main.TRUNCATION_WARNING_PREFIX)
+    assert "large.py" in warning_text
+    assert str(main.MAX_FILE_CHARS) in warning_text
+    assert "model only saw partial file content" in warning_text
+    assert warning_text in captured["prompt"]
+    assert "large.py" in caplog.text
+    assert "model only saw partial file content" in caplog.text
+
+
+def test_bugs_and_review_prompts_are_confirmed_only(monkeypatch, tmp_path):
+    projects_dir, _ = create_project(tmp_path)
+    main = import_main(monkeypatch, app_env(tmp_path, projects_dir))
+    prompts = []
+
+    def fake_ask(prompt, model):
+        prompts.append(prompt)
+        return main.NO_CONFIRMED_ISSUE, "mock-model", 0.01
+
+    monkeypatch.setattr(main, "ask_with_fallback", fake_ask)
+    client = TestClient(main.app)
+
+    file_response = client.post(
+        "/api/file-action",
+        json={"project": "proj", "file": "main.py", "action": "review"},
+    )
+    project_response = client.post(
+        "/api/project-action",
+        json={"project": "proj", "action": "bugs"},
+    )
+
+    assert file_response.status_code == 200
+    assert project_response.status_code == 200
+    assert len(prompts) == 2
+    for prompt in prompts:
+        assert "Only confirmed issues." in prompt
+        assert "No generic best-practice lists." in prompt
+        assert "No style, documentation, formatting, or comment suggestions." in prompt
+        assert "Must cite exact function/location/evidence" in prompt
+        assert f"If no confirmed issue exists, output exactly:\n{main.NO_CONFIRMED_ISSUE}" in prompt
+
+
+def test_generic_audit_sections_without_evidence_are_suppressed(monkeypatch):
+    main = import_main(monkeypatch, {"FORCEHUB_AUTH_DISABLED": "1"})
+
+    generic = """Security Concerns
+- Review authentication.
+
+Recommendations
+- Improve validation.
+"""
+    evidenced = """Security Concerns
+Location: app/main.py:10
+Evidence: the handler raises before validating input.
+"""
+
+    assert main.clean_confirmed_audit_answer(generic) == main.NO_CONFIRMED_ISSUE
+    assert main.clean_confirmed_audit_answer(evidenced) == evidenced.strip()
