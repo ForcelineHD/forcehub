@@ -15,6 +15,7 @@ from collections import defaultdict, deque
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path, PurePosixPath
+from threading import Lock
 from typing import Literal
 from urllib.parse import urlparse
 
@@ -157,6 +158,7 @@ app = FastAPI(title="ForceHub", description="Local AI dev dashboard.", version=A
 CHAT_HISTORY: list[dict[str, str]] = []
 LAST_DEBUG: dict[str, str | int | float] = {}
 RATE_LIMIT_BUCKETS: dict[str, deque[float]] = defaultdict(deque)
+RATE_LIMIT_LOCK = Lock()
 
 
 @dataclass(frozen=True)
@@ -504,6 +506,18 @@ def check_basic_auth(request: Request) -> AuthResult:
         return AuthResult(False, "Invalid Basic auth header")
 
 
+def purge_rate_limit_buckets(window_start: float) -> None:
+    stale_keys = []
+    for key, bucket in list(RATE_LIMIT_BUCKETS.items()):
+        while bucket and bucket[0] < window_start:
+            bucket.popleft()
+        if not bucket:
+            stale_keys.append(key)
+
+    for key in stale_keys:
+        RATE_LIMIT_BUCKETS.pop(key, None)
+
+
 def rate_limit_result(request: Request) -> tuple[bool, int]:
     if RATE_LIMIT_DISABLED or request.url.path.startswith("/status"):
         return False, 0
@@ -512,14 +526,14 @@ def rate_limit_result(request: Request) -> tuple[bool, int]:
     window_start = now - RATE_LIMIT_WINDOW_SECONDS
     client_host = request.client.host if request.client else "unknown"
     key = f"{client_host}:{request.url.path}"
-    bucket = RATE_LIMIT_BUCKETS[key]
-    while bucket and bucket[0] < window_start:
-        bucket.popleft()
-    if len(bucket) >= RATE_LIMIT_REQUESTS:
-        retry_after = max(1, int(RATE_LIMIT_WINDOW_SECONDS - (now - bucket[0])))
-        return True, retry_after
-    bucket.append(now)
-    return False, 0
+    with RATE_LIMIT_LOCK:
+        purge_rate_limit_buckets(window_start)
+        bucket = RATE_LIMIT_BUCKETS[key]
+        if len(bucket) >= RATE_LIMIT_REQUESTS:
+            retry_after = max(1, int(RATE_LIMIT_WINDOW_SECONDS - (now - bucket[0])))
+            return True, retry_after
+        bucket.append(now)
+        return False, 0
 
 
 @app.middleware("http")
