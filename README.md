@@ -36,6 +36,7 @@ The app listens on `127.0.0.1:8000` by default.
 - `FORCEHUB_DATA_DIR`: directory used for chat history and cached settings
 - `FORCEHUB_USERNAME`: basic-auth username
 - `FORCEHUB_PASSWORD`: basic-auth password
+- `FORCEHUB_AUTH_DISABLED`: set to `1` only for an intentionally unauthenticated local instance
 - `FORCEHUB_HOST`: bind host for the FastAPI server
 - `FORCEHUB_PORT`: bind port for the FastAPI server
 - `FORCEHUB_GIT_BIN`: explicit path to the `git` executable

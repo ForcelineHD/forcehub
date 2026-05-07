@@ -2,11 +2,14 @@ import base64
 import difflib
 import importlib.util
 import json
+import logging
 import os
+import secrets
 import shutil
 import subprocess
 import sys
 import time
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Literal
@@ -26,8 +29,9 @@ DATA_DIR = Path(os.getenv("FORCEHUB_DATA_DIR", str(BASE_DIR / "data"))).expandus
 CHAT_FILE = DATA_DIR / "chats.json"
 PROJECT_CACHE_FILE = DATA_DIR / "project_cache.json"
 PROJECT_SETTINGS_FILE = DATA_DIR / "project_settings.json"
-FORCEHUB_USERNAME = os.getenv("FORCEHUB_USERNAME") or os.getenv("USER") or os.getenv("USERNAME") or "forcehub"
-FORCEHUB_PASSWORD = os.getenv("FORCEHUB_PASSWORD", "forcehub")
+FORCEHUB_USERNAME = os.getenv("FORCEHUB_USERNAME", "").strip()
+FORCEHUB_PASSWORD = os.getenv("FORCEHUB_PASSWORD", "")
+FORCEHUB_AUTH_DISABLED = os.getenv("FORCEHUB_AUTH_DISABLED", "").strip().lower() in {"1", "true", "yes", "on"}
 
 OLLAMA_GENERATE_URL = "http://127.0.0.1:11434/api/generate"
 OLLAMA_TAGS_URL = "http://127.0.0.1:11434/api/tags"
@@ -39,9 +43,19 @@ CPP_SOURCE_PATTERNS = ("*.cpp", "*.cc", "*.cxx")
 CPP_HEADER_PATTERNS = ("*.h", "*.hh", "*.hpp", "*.hxx")
 
 app = FastAPI(title="ForceHub", description="Local AI dev dashboard.", version=APP_VERSION)
+logger = logging.getLogger(APP_NAME)
 
 CHAT_HISTORY: list[dict[str, str]] = []
 LAST_DEBUG: dict[str, str | int | float] = {}
+
+
+@dataclass(frozen=True)
+class AuthResult:
+    ok: bool
+    message: str = ""
+
+    def __bool__(self) -> bool:
+        return self.ok
 
 
 class StatusResponse(BaseModel):
@@ -172,23 +186,45 @@ def get_git_command() -> str | None:
 
 
 def is_auth_disabled() -> bool:
-    return FORCEHUB_PASSWORD.strip() == ""
+    return FORCEHUB_AUTH_DISABLED
 
 
-def check_basic_auth(request: Request) -> bool:
+def check_basic_auth(request: Request) -> AuthResult:
     if is_auth_disabled():
-        return True
+        return AuthResult(True)
+
+    if not FORCEHUB_USERNAME or not FORCEHUB_PASSWORD:
+        message = (
+            "ForceHub authentication is not configured. Set FORCEHUB_USERNAME and "
+            "FORCEHUB_PASSWORD, or set FORCEHUB_AUTH_DISABLED=1 for local-only use."
+        )
+        logger.error(message)
+        return AuthResult(False, message)
 
     auth = request.headers.get("authorization", "")
-    if not auth.startswith("Basic "):
-        return False
+    scheme, _, token = auth.partition(" ")
+    if scheme.lower() != "basic" or not token.strip():
+        return AuthResult(False, "ForceHub authentication required")
 
     try:
-        decoded = base64.b64decode(auth.split(" ", 1)[1]).decode("utf-8")
-        username, password = decoded.split(":", 1)
-        return username == FORCEHUB_USERNAME and password == FORCEHUB_PASSWORD
-    except Exception:
-        return False
+        decoded = base64.b64decode(token, validate=True).decode("utf-8")
+        username, separator, password = decoded.partition(":")
+        if not separator:
+            return AuthResult(False, "Invalid Basic auth payload")
+        if not username:
+            return AuthResult(False, "Basic auth username is required")
+        if not password:
+            return AuthResult(False, "Basic auth password is required")
+
+        username_matches = secrets.compare_digest(username, FORCEHUB_USERNAME)
+        password_matches = secrets.compare_digest(password, FORCEHUB_PASSWORD)
+        if username_matches and password_matches:
+            return AuthResult(True)
+
+        return AuthResult(False, "Invalid ForceHub username or password")
+    except Exception as exc:
+        logger.warning("Rejected malformed Basic auth header: %s", exc)
+        return AuthResult(False, "Invalid Basic auth header")
 
 
 @app.middleware("http")
@@ -196,9 +232,10 @@ async def forcehub_basic_auth(request: Request, call_next):
     if request.url.path.startswith("/status"):
         return await call_next(request)
 
-    if not check_basic_auth(request):
+    auth_result = check_basic_auth(request)
+    if not auth_result:
         return PlainTextResponse(
-            "ForceHub authentication required",
+            auth_result.message or "ForceHub authentication required",
             status_code=401,
             headers={"WWW-Authenticate": 'Basic realm="ForceHub"'},
         )
