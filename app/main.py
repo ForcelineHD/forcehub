@@ -144,9 +144,44 @@ def is_relative_to(path: Path, other: Path) -> bool:
         return False
 
 
+def normalize_project_name(project: str) -> str:
+    normalized = project.strip()
+    if not normalized:
+        raise ValueError("Project name is required")
+
+    path = Path(normalized)
+    if path.is_absolute() or path.drive or len(path.parts) != 1 or normalized in {".", ".."}:
+        raise ValueError("Invalid project name: use a direct project directory name")
+
+    return normalized
+
+
+def normalize_file_path(file: str) -> Path:
+    normalized = file.strip()
+    if not normalized:
+        raise ValueError("File path is required")
+
+    path = Path(normalized)
+    if path.is_absolute() or path.drive or any(part in {".", ".."} for part in path.parts):
+        raise ValueError("Invalid file path: use a project-relative file path")
+
+    return path
+
+
 def list_project_names() -> list[str]:
     ensure_dir(PROJECTS_DIR)
-    projects = [p.name for p in PROJECTS_DIR.iterdir() if p.is_dir()]
+    projects = []
+    for path in PROJECTS_DIR.iterdir():
+        if not path.is_dir():
+            continue
+        try:
+            normalized = normalize_project_name(path.name)
+            resolved = path.resolve()
+        except (OSError, ValueError) as exc:
+            logger.warning("Skipping invalid project directory %s: %s", path, exc)
+            continue
+        if is_relative_to(resolved, PROJECTS_DIR):
+            projects.append(normalized)
     return sorted(projects)
 
 
@@ -260,13 +295,14 @@ def save_project_settings(data: dict) -> None:
 
 def safe_project_path(project: str) -> Path:
     ensure_dir(PROJECTS_DIR)
-    normalized_project = project.strip()
-    if not normalized_project:
-        raise ValueError("Project name is required")
+    normalized_project = normalize_project_name(project)
+    allowed_projects = set(list_project_names())
+    if normalized_project not in allowed_projects:
+        raise ValueError(f"Project is not allowed or does not exist: {normalized_project}")
 
     target = (PROJECTS_DIR / normalized_project).resolve()
     if not is_relative_to(target, PROJECTS_DIR):
-        raise ValueError("Invalid project path")
+        raise ValueError("Invalid project path: resolved outside the allowed projects directory")
     if not target.exists() or not target.is_dir():
         raise ValueError(f"Project not found: {normalized_project}")
     return target
@@ -274,11 +310,14 @@ def safe_project_path(project: str) -> Path:
 
 def safe_file_path(project: str, file: str) -> Path:
     root = safe_project_path(project)
-    target = (root / file).resolve()
+    relative_file = normalize_file_path(file)
+    target = (root / relative_file).resolve()
     if not is_relative_to(target, root.resolve()):
-        raise ValueError("Invalid file path")
+        raise ValueError("Invalid file path: resolved outside the project directory")
     if not target.exists() or not target.is_file():
         raise ValueError(f"File not found: {file}")
+    if not should_include_file(target):
+        raise ValueError(f"File is not in the allowed ForceHub file whitelist: {file}")
     return target
 
 
@@ -308,8 +347,14 @@ def read_file_safe(path: Path, root: Path) -> str:
 
 def build_project_context(project: str) -> str:
     root = safe_project_path(project)
+    if not root.exists() or not root.is_dir():
+        raise ValueError(f"Project directory is invalid: {project}")
     chunks = [f"PROJECT: {project}\nROOT: {root}\n"]
-    files = [p for p in root.rglob("*") if p.is_file() and should_include_file(p)]
+    try:
+        files = [p for p in root.rglob("*") if p.is_file() and should_include_file(p)]
+    except OSError as exc:
+        logger.exception("Failed to scan project context for %s", root)
+        raise RuntimeError(f"Unable to scan project directory: {project}") from exc
     files = sorted(files, key=lambda p: str(p.relative_to(root)))[:MAX_PROJECT_FILES]
     for file in files:
         chunks.append(read_file_safe(file, root))
@@ -1169,12 +1214,12 @@ Rules:
 @app.post("/api/create-cpp-project")
 def api_create_cpp_project(req: CreateCppProjectRequest):
     try:
-        if any(sep in req.project for sep in ("/", "\\")) or ".." in req.project or not req.project.strip():
-            raise ValueError("Invalid project name")
-
-        root = PROJECTS_DIR / req.project
+        project_name = normalize_project_name(req.project)
+        root = (PROJECTS_DIR / project_name).resolve()
+        if not is_relative_to(root, PROJECTS_DIR):
+            raise ValueError("Invalid project path: resolved outside the allowed projects directory")
         if root.exists():
-            raise ValueError(f"Project already exists: {req.project}")
+            raise ValueError(f"Project already exists: {project_name}")
 
         (root / "src").mkdir(parents=True)
         (root / "include").mkdir()
@@ -1186,7 +1231,7 @@ def api_create_cpp_project(req: CreateCppProjectRequest):
 
         (root / "CMakeLists.txt").write_text(
             "cmake_minimum_required(VERSION 3.20)\n"
-            f"project({req.project} LANGUAGES CXX)\n\n"
+            f"project({project_name} LANGUAGES CXX)\n\n"
             "set(CMAKE_CXX_STANDARD 20)\n"
             "set(CMAKE_CXX_STANDARD_REQUIRED ON)\n"
             "set(CMAKE_CXX_EXTENSIONS OFF)\n\n"
@@ -1199,7 +1244,7 @@ def api_create_cpp_project(req: CreateCppProjectRequest):
         )
 
         (root / ".gitignore").write_text("build/\n*.o\n*.exe\n*.out\n.cache/\n", encoding="utf-8")
-        (root / "README.md").write_text(f"# {req.project}\n\nC++20 CMake project.\n", encoding="utf-8")
+        (root / "README.md").write_text(f"# {project_name}\n\nC++20 CMake project.\n", encoding="utf-8")
 
         git_bin = get_git_command()
         git_message = ""
