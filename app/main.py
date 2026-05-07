@@ -8,6 +8,7 @@ import os
 import re
 import secrets
 import shutil
+import stat
 import subprocess
 import sys
 import time
@@ -15,7 +16,9 @@ from collections import defaultdict, deque
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path, PurePosixPath
+from threading import Lock
 from typing import Literal
+from urllib.parse import urlparse
 
 import requests
 from fastapi import FastAPI, Request
@@ -28,6 +31,8 @@ APP_VERSION = "0.8.0"
 logger = logging.getLogger(APP_NAME)
 
 BASE_DIR = Path(__file__).resolve().parent.parent
+PROJECT_NAME_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+CONTROL_CHAR_PATTERN = re.compile(r"[\x00-\x1f\x7f]")
 
 
 def env_bool(name: str, default: bool = False) -> bool:
@@ -66,8 +71,52 @@ def env_str(name: str, default: str = "") -> str:
 
 
 def env_path(name: str, default: Path | str) -> Path:
-    raw = env_str(name, str(default))
-    return Path(raw).expanduser().resolve()
+    raw = os.getenv(name)
+    value = str(default) if raw is None or not raw.strip() else raw.strip()
+    if CONTROL_CHAR_PATTERN.search(value):
+        raise ValueError(f"{name} contains control characters")
+    expanded = os.path.expandvars(os.path.expanduser(value))
+    if CONTROL_CHAR_PATTERN.search(expanded):
+        raise ValueError(f"{name} expands to a path with control characters")
+    return Path(expanded).resolve()
+
+
+def env_config_value(name: str, default: str) -> str:
+    raw = os.getenv(name)
+    if raw is None or not raw.strip():
+        return default
+    value = raw.strip()
+    if CONTROL_CHAR_PATTERN.search(value):
+        raise ValueError(f"{name} contains control characters")
+    return value
+
+
+def validate_absolute_http_url(value: str, name: str) -> str:
+    parsed = urlparse(value)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        raise ValueError(f"{name} must be an absolute http(s) URL")
+    return value.rstrip("/")
+
+
+def validate_ollama_endpoint(value: str, name: str, base_url: str) -> str:
+    if CONTROL_CHAR_PATTERN.search(value):
+        raise ValueError(f"{name} contains control characters")
+    if value.startswith("/"):
+        path = PurePosixPath(value)
+        if value.startswith("//") or "\\" in value or any(part in {".", ".."} for part in path.parts):
+            raise ValueError(f"{name} must be a safe relative path")
+        return f"{base_url}{value}"
+
+    parsed = urlparse(value)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        raise ValueError(f"{name} must be an absolute http(s) URL or a relative path starting with /")
+    return value
+
+
+def validate_model_name(value: str) -> str:
+    if not value or CONTROL_CHAR_PATTERN.search(value) or len(value) > 128:
+        raise ValueError("Invalid model name")
+    return value
 
 
 PROJECTS_DIR = env_path("FORCEHUB_PROJECTS_DIR", BASE_DIR.parent)
@@ -77,15 +126,46 @@ CHAT_FILE = DATA_DIR / "chats.json"
 PROJECT_CACHE_FILE = DATA_DIR / "project_cache.json"
 PROJECT_SETTINGS_FILE = DATA_DIR / "project_settings.json"
 
-OLLAMA_BASE_URL = env_str("FORCEHUB_OLLAMA_URL", "http://127.0.0.1:11434").rstrip("/")
-OLLAMA_GENERATE_URL = env_str("FORCEHUB_OLLAMA_GENERATE_URL", f"{OLLAMA_BASE_URL}/api/generate")
-OLLAMA_TAGS_URL = env_str("FORCEHUB_OLLAMA_TAGS_URL", f"{OLLAMA_BASE_URL}/api/tags")
+OLLAMA_BASE_URL = validate_absolute_http_url(
+    env_config_value("FORCEHUB_OLLAMA_URL", "http://127.0.0.1:11434"),
+    "FORCEHUB_OLLAMA_URL",
+)
+OLLAMA_GENERATE_URL = validate_ollama_endpoint(
+    env_config_value("FORCEHUB_OLLAMA_GENERATE_URL", f"{OLLAMA_BASE_URL}/api/generate"),
+    "FORCEHUB_OLLAMA_GENERATE_URL",
+    OLLAMA_BASE_URL,
+)
+OLLAMA_TAGS_URL = validate_ollama_endpoint(
+    env_config_value("FORCEHUB_OLLAMA_TAGS_URL", f"{OLLAMA_BASE_URL}/api/tags"),
+    "FORCEHUB_OLLAMA_TAGS_URL",
+    OLLAMA_BASE_URL,
+)
 VALID_MODES = {"normal", "code", "cpp", "short", "explain"}
-DEFAULT_MODEL = env_str("FORCEHUB_DEFAULT_MODEL", "qwen2.5-coder:1.5b")
-DEFAULT_MODE = env_str("FORCEHUB_DEFAULT_MODE", "normal")
-if DEFAULT_MODE not in VALID_MODES:
-    logger.warning("Invalid FORCEHUB_DEFAULT_MODE %s; using normal", DEFAULT_MODE)
-    DEFAULT_MODE = "normal"
+SAFE_DEFAULT_MODEL = "qwen2.5-coder:3b"
+
+
+def configured_default_model() -> str:
+    try:
+        return validate_model_name(env_config_value("FORCEHUB_DEFAULT_MODEL", SAFE_DEFAULT_MODEL))
+    except ValueError as exc:
+        logger.warning("Invalid FORCEHUB_DEFAULT_MODEL; using %s: %s", SAFE_DEFAULT_MODEL, exc)
+        return SAFE_DEFAULT_MODEL
+
+
+def configured_default_mode() -> str:
+    try:
+        mode = env_config_value("FORCEHUB_DEFAULT_MODE", "normal")
+    except ValueError as exc:
+        logger.warning("Invalid FORCEHUB_DEFAULT_MODE; using normal: %s", exc)
+        return "normal"
+    if mode not in VALID_MODES:
+        logger.warning("Invalid FORCEHUB_DEFAULT_MODE %s; using normal", mode)
+        return "normal"
+    return mode
+
+
+DEFAULT_MODEL = configured_default_model()
+DEFAULT_MODE = configured_default_mode()
 RATE_LIMIT_REQUESTS = env_int("FORCEHUB_RATE_LIMIT_REQUESTS", 120, minimum=1)
 RATE_LIMIT_WINDOW_SECONDS = env_int("FORCEHUB_RATE_LIMIT_WINDOW_SECONDS", 60, minimum=1)
 RATE_LIMIT_DISABLED = env_bool("FORCEHUB_RATE_LIMIT_DISABLED")
@@ -95,8 +175,6 @@ MAX_PROJECT_FILES = 15
 MAX_SEARCH_RESULTS = 80
 CPP_SOURCE_PATTERNS = ("*.cpp", "*.cc", "*.cxx")
 CPP_HEADER_PATTERNS = ("*.h", "*.hh", "*.hpp", "*.hxx")
-PROJECT_NAME_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
-CONTROL_CHAR_PATTERN = re.compile(r"[\x00-\x1f\x7f]")
 SENSITIVE_LOG_PATTERN = re.compile(
     r"(?i)(authorization\s*[:=]\s*(?:basic|bearer)\s+)[^\s,;]+"
     r"|((?:password|passwd|pwd|token|secret|api[_-]?key)\s*[:=]\s*)[^\s,;]+"
@@ -107,6 +185,7 @@ app = FastAPI(title="ForceHub", description="Local AI dev dashboard.", version=A
 CHAT_HISTORY: list[dict[str, str]] = []
 LAST_DEBUG: dict[str, str | int | float] = {}
 RATE_LIMIT_BUCKETS: dict[str, deque[float]] = defaultdict(deque)
+RATE_LIMIT_LOCK = Lock()
 
 
 @dataclass(frozen=True)
@@ -141,9 +220,7 @@ class ForceHubModel(BaseModel):
     @field_validator("model", "preferred_model", check_fields=False)
     @classmethod
     def validate_model_field(cls, value: str) -> str:
-        if not value or CONTROL_CHAR_PATTERN.search(value) or len(value) > 128:
-            raise ValueError("Invalid model name")
-        return value
+        return validate_model_name(value)
 
 
 def redact_sensitive(value: object) -> str:
@@ -391,12 +468,36 @@ def get_git_command() -> str | None:
     return resolve_executable("git")
 
 
+def password_file_is_private(mode: int) -> bool:
+    if not stat.S_ISREG(mode):
+        logger.error("Configured password file is not a regular file")
+        return False
+
+    if os.name == "posix":
+        if mode & (stat.S_IRWXG | stat.S_IRWXO):
+            logger.error("Configured password file has insecure permissions; use owner-only permissions such as chmod 600")
+            return False
+        if not mode & stat.S_IRUSR:
+            logger.error("Configured password file must be owner-readable")
+            return False
+
+    return True
+
+
 def read_secret_file(path: str) -> str:
+    if CONTROL_CHAR_PATTERN.search(path):
+        logger.error("Configured password file path contains control characters")
+        return ""
+
     secret_path = Path(path).expanduser().resolve()
     try:
+        file_stat = secret_path.stat()
+        if not password_file_is_private(file_stat.st_mode):
+            return ""
         return secret_path.read_text(encoding="utf-8").strip()
     except OSError as exc:
-        logger.error("Unable to read configured secret file %s: %s", secret_path, exc)
+        reason = getattr(exc, "strerror", None) or exc.__class__.__name__
+        logger.error("Unable to read configured password file: %s", reason)
         return ""
 
 
@@ -454,6 +555,18 @@ def check_basic_auth(request: Request) -> AuthResult:
         return AuthResult(False, "Invalid Basic auth header")
 
 
+def purge_rate_limit_buckets(window_start: float) -> None:
+    stale_keys = []
+    for key, bucket in list(RATE_LIMIT_BUCKETS.items()):
+        while bucket and bucket[0] < window_start:
+            bucket.popleft()
+        if not bucket:
+            stale_keys.append(key)
+
+    for key in stale_keys:
+        RATE_LIMIT_BUCKETS.pop(key, None)
+
+
 def rate_limit_result(request: Request) -> tuple[bool, int]:
     if RATE_LIMIT_DISABLED or request.url.path.startswith("/status"):
         return False, 0
@@ -462,14 +575,14 @@ def rate_limit_result(request: Request) -> tuple[bool, int]:
     window_start = now - RATE_LIMIT_WINDOW_SECONDS
     client_host = request.client.host if request.client else "unknown"
     key = f"{client_host}:{request.url.path}"
-    bucket = RATE_LIMIT_BUCKETS[key]
-    while bucket and bucket[0] < window_start:
-        bucket.popleft()
-    if len(bucket) >= RATE_LIMIT_REQUESTS:
-        retry_after = max(1, int(RATE_LIMIT_WINDOW_SECONDS - (now - bucket[0])))
-        return True, retry_after
-    bucket.append(now)
-    return False, 0
+    with RATE_LIMIT_LOCK:
+        purge_rate_limit_buckets(window_start)
+        bucket = RATE_LIMIT_BUCKETS[key]
+        if len(bucket) >= RATE_LIMIT_REQUESTS:
+            retry_after = max(1, int(RATE_LIMIT_WINDOW_SECONDS - (now - bucket[0])))
+            return True, retry_after
+        bucket.append(now)
+        return False, 0
 
 
 @app.middleware("http")
