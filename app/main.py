@@ -69,8 +69,14 @@ def env_str(name: str, default: str = "") -> str:
 
 
 def env_path(name: str, default: Path | str) -> Path:
-    raw = env_str(name, str(default))
-    return Path(raw).expanduser().resolve()
+    raw = os.getenv(name)
+    value = str(default) if raw is None or not raw.strip() else raw.strip()
+    if CONTROL_CHAR_PATTERN.search(value):
+        raise ValueError(f"{name} contains control characters")
+    expanded = os.path.expandvars(os.path.expanduser(value))
+    if CONTROL_CHAR_PATTERN.search(expanded):
+        raise ValueError(f"{name} expands to a path with control characters")
+    return Path(expanded).resolve()
 
 
 def env_config_value(name: str, default: str) -> str:
