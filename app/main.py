@@ -283,14 +283,26 @@ def load_project_settings() -> dict:
     if not PROJECT_SETTINGS_FILE.exists():
         return {}
     try:
-        return json.loads(PROJECT_SETTINGS_FILE.read_text(encoding="utf-8"))
-    except Exception:
+        data = json.loads(PROJECT_SETTINGS_FILE.read_text(encoding="utf-8"))
+        if isinstance(data, dict):
+            return data
+        logger.error("Project settings file must contain a JSON object: %s", PROJECT_SETTINGS_FILE)
+        return {}
+    except json.JSONDecodeError as exc:
+        logger.error("Invalid JSON in project settings file %s: %s", PROJECT_SETTINGS_FILE, exc)
+        return {}
+    except OSError:
+        logger.exception("Failed to read project settings file %s", PROJECT_SETTINGS_FILE)
         return {}
 
 
 def save_project_settings(data: dict) -> None:
-    ensure_dir(DATA_DIR)
-    PROJECT_SETTINGS_FILE.write_text(json.dumps(data, indent=2), encoding="utf-8")
+    try:
+        ensure_dir(DATA_DIR)
+        PROJECT_SETTINGS_FILE.write_text(json.dumps(data, indent=2), encoding="utf-8")
+    except OSError as exc:
+        logger.exception("Failed to save project settings file %s", PROJECT_SETTINGS_FILE)
+        raise RuntimeError(f"Unable to save project settings: {PROJECT_SETTINGS_FILE}") from exc
 
 
 def safe_project_path(project: str) -> Path:
