@@ -8,6 +8,7 @@ import os
 import re
 import secrets
 import shutil
+import stat
 import subprocess
 import sys
 import time
@@ -467,12 +468,36 @@ def get_git_command() -> str | None:
     return resolve_executable("git")
 
 
+def password_file_is_private(mode: int) -> bool:
+    if not stat.S_ISREG(mode):
+        logger.error("Configured password file is not a regular file")
+        return False
+
+    if os.name == "posix":
+        if mode & (stat.S_IRWXG | stat.S_IRWXO):
+            logger.error("Configured password file has insecure permissions; use owner-only permissions such as chmod 600")
+            return False
+        if not mode & stat.S_IRUSR:
+            logger.error("Configured password file must be owner-readable")
+            return False
+
+    return True
+
+
 def read_secret_file(path: str) -> str:
+    if CONTROL_CHAR_PATTERN.search(path):
+        logger.error("Configured password file path contains control characters")
+        return ""
+
     secret_path = Path(path).expanduser().resolve()
     try:
+        file_stat = secret_path.stat()
+        if not password_file_is_private(file_stat.st_mode):
+            return ""
         return secret_path.read_text(encoding="utf-8").strip()
     except OSError as exc:
-        logger.error("Unable to read configured secret file %s: %s", secret_path, exc)
+        reason = getattr(exc, "strerror", None) or exc.__class__.__name__
+        logger.error("Unable to read configured password file: %s", reason)
         return ""
 
 
