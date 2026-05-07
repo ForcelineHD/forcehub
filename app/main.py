@@ -11,6 +11,7 @@ import shutil
 import subprocess
 import sys
 import time
+from collections import defaultdict, deque
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path, PurePosixPath
@@ -85,6 +86,9 @@ DEFAULT_MODE = env_str("FORCEHUB_DEFAULT_MODE", "normal")
 if DEFAULT_MODE not in VALID_MODES:
     logger.warning("Invalid FORCEHUB_DEFAULT_MODE %s; using normal", DEFAULT_MODE)
     DEFAULT_MODE = "normal"
+RATE_LIMIT_REQUESTS = env_int("FORCEHUB_RATE_LIMIT_REQUESTS", 120, minimum=1)
+RATE_LIMIT_WINDOW_SECONDS = env_int("FORCEHUB_RATE_LIMIT_WINDOW_SECONDS", 60, minimum=1)
+RATE_LIMIT_DISABLED = env_bool("FORCEHUB_RATE_LIMIT_DISABLED")
 
 MAX_FILE_CHARS = 8000
 MAX_PROJECT_FILES = 15
@@ -102,6 +106,7 @@ app = FastAPI(title="ForceHub", description="Local AI dev dashboard.", version=A
 
 CHAT_HISTORY: list[dict[str, str]] = []
 LAST_DEBUG: dict[str, str | int | float] = {}
+RATE_LIMIT_BUCKETS: dict[str, deque[float]] = defaultdict(deque)
 
 
 @dataclass(frozen=True)
@@ -449,6 +454,24 @@ def check_basic_auth(request: Request) -> AuthResult:
         return AuthResult(False, "Invalid Basic auth header")
 
 
+def rate_limit_result(request: Request) -> tuple[bool, int]:
+    if RATE_LIMIT_DISABLED or request.url.path.startswith("/status"):
+        return False, 0
+
+    now = time.monotonic()
+    window_start = now - RATE_LIMIT_WINDOW_SECONDS
+    client_host = request.client.host if request.client else "unknown"
+    key = f"{client_host}:{request.url.path}"
+    bucket = RATE_LIMIT_BUCKETS[key]
+    while bucket and bucket[0] < window_start:
+        bucket.popleft()
+    if len(bucket) >= RATE_LIMIT_REQUESTS:
+        retry_after = max(1, int(RATE_LIMIT_WINDOW_SECONDS - (now - bucket[0])))
+        return True, retry_after
+    bucket.append(now)
+    return False, 0
+
+
 @app.middleware("http")
 async def forcehub_basic_auth(request: Request, call_next):
     if request.url.path.startswith("/status"):
@@ -462,6 +485,18 @@ async def forcehub_basic_auth(request: Request, call_next):
             headers={"WWW-Authenticate": 'Basic realm="ForceHub"'},
         )
 
+    return await call_next(request)
+
+
+@app.middleware("http")
+async def forcehub_rate_limit(request: Request, call_next):
+    limited, retry_after = rate_limit_result(request)
+    if limited:
+        return PlainTextResponse(
+            "ForceHub rate limit exceeded",
+            status_code=429,
+            headers={"Retry-After": str(retry_after)},
+        )
     return await call_next(request)
 
 

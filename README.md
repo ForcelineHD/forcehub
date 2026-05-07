@@ -50,3 +50,6 @@ The app listens on `127.0.0.1:8000` by default.
 - `FORCEHUB_LOG_FILE`: optional rotating log file path; unset keeps app logs off disk
 - `FORCEHUB_LOG_MAX_BYTES`: maximum size for one log file before rotation
 - `FORCEHUB_LOG_BACKUP_COUNT`: number of rotated log files to keep
+- `FORCEHUB_RATE_LIMIT_REQUESTS`: requests allowed per client/path window, default `120`
+- `FORCEHUB_RATE_LIMIT_WINDOW_SECONDS`: rate-limit window in seconds, default `60`
+- `FORCEHUB_RATE_LIMIT_DISABLED`: set to `1` to disable rate limiting
