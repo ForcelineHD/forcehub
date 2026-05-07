@@ -145,6 +145,7 @@ VALID_MODES = {"normal", "code", "cpp", "short", "explain"}
 SAFE_DEFAULT_MODEL = "qwen2.5-coder:3b"
 OLLAMA_FALLBACK_MODEL = "qwen2.5-coder:1.5b"
 NO_CONFIRMED_ISSUE = "No confirmed remaining issue found."
+TRUNCATION_WARNING_PREFIX = "FORCEHUB TRUNCATION WARNING:"
 CONFIRMED_AUDIT_RULES = f"""Confirmed-only audit rules:
 - Only confirmed issues.
 - No generic best-practice lists.
@@ -729,12 +730,37 @@ def iter_project_files(root: Path):
         yield resolved
 
 
+def format_truncation_warning(path: Path | str, max_chars: int) -> str:
+    return (
+        f"{TRUNCATION_WARNING_PREFIX} {path} exceeded {max_chars} characters. "
+        "The model only saw partial file content."
+    )
+
+
+def collect_truncation_warnings(text: str) -> list[str]:
+    warnings = []
+    seen = set()
+    for line in text.splitlines():
+        warning = line.strip()
+        if warning.startswith(TRUNCATION_WARNING_PREFIX) and warning not in seen:
+            warnings.append(warning)
+            seen.add(warning)
+    return warnings
+
+
+def prepend_truncation_warnings(answer: str, source_text: str) -> str:
+    warnings = collect_truncation_warnings(source_text)
+    if not warnings:
+        return answer
+    return "\n".join(warnings) + "\n\n" + answer
+
+
 def read_text_limited(path: Path, max_chars: int = MAX_FILE_CHARS) -> tuple[str, bool]:
     with path.open("r", encoding="utf-8", errors="replace") as handle:
         text = handle.read(max_chars + 1)
 
     if len(text) > max_chars:
-        logger.error("File exceeds maximum read length of %s chars and was truncated: %s", max_chars, path)
+        logger.error(format_truncation_warning(path, max_chars))
         return text[:max_chars], True
 
     return text, False
@@ -745,7 +771,8 @@ def read_file_safe(path: Path, root: Path) -> str:
         rel = path.relative_to(root)
         text, truncated = read_text_limited(path)
         suffix = f" (truncated after {MAX_FILE_CHARS} chars)" if truncated else ""
-        return f"\n\n--- FILE: {rel}{suffix} ---\n{text}"
+        warning = f"{format_truncation_warning(rel, MAX_FILE_CHARS)}\n" if truncated else ""
+        return f"\n\n--- FILE: {rel}{suffix} ---\n{warning}{text}"
     except Exception as e:
         logger.exception("Failed to read file %s", path)
         return f"\n\n--- FILE ERROR: {path.name}: {e} ---"
@@ -1716,6 +1743,7 @@ def project_action(req: ProjectActionRequest):
         answer, used_model, elapsed = ask_with_fallback(final_prompt, req.model)
         if req.action == "bugs":
             answer = clean_confirmed_audit_answer(answer)
+        answer = prepend_truncation_warnings(answer, context)
         LAST_DEBUG.update({"model": used_model, "elapsed": elapsed, "action": req.action})
         return {"text": answer, "action": req.action, "model": used_model}
     except Exception as e:
@@ -1756,6 +1784,7 @@ def file_action(req: FileReviewRequest):
         answer, used_model, elapsed = ask_with_fallback(final_prompt, req.model)
         if req.action in {"review", "bugs"}:
             answer = clean_confirmed_audit_answer(answer)
+        answer = prepend_truncation_warnings(answer, content)
         LAST_DEBUG.update({"model": used_model, "elapsed": elapsed, "action": f"file_{req.action}"})
         return {"text": answer, "file": req.file, "action": req.action, "model": used_model}
     except Exception as e:
