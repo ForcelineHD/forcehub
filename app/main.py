@@ -4,6 +4,7 @@ import importlib.util
 import json
 import logging
 import os
+import re
 import secrets
 import shutil
 import subprocess
@@ -11,7 +12,7 @@ import sys
 import time
 from dataclasses import dataclass
 from datetime import datetime
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Literal
 
 import requests
@@ -42,6 +43,8 @@ MAX_PROJECT_FILES = 15
 MAX_SEARCH_RESULTS = 80
 CPP_SOURCE_PATTERNS = ("*.cpp", "*.cc", "*.cxx")
 CPP_HEADER_PATTERNS = ("*.h", "*.hh", "*.hpp", "*.hxx")
+PROJECT_NAME_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+CONTROL_CHAR_PATTERN = re.compile(r"[\x00-\x1f\x7f]")
 
 app = FastAPI(title="ForceHub", description="Local AI dev dashboard.", version=APP_VERSION)
 logger = logging.getLogger(APP_NAME)
@@ -150,9 +153,12 @@ def normalize_project_name(project: str) -> str:
     if not normalized:
         raise ValueError("Project name is required")
 
-    path = Path(normalized)
-    if path.is_absolute() or path.drive or len(path.parts) != 1 or normalized in {".", ".."}:
+    if CONTROL_CHAR_PATTERN.search(normalized):
+        raise ValueError("Invalid project name: control characters are not allowed")
+    if "/" in normalized or "\\" in normalized:
         raise ValueError("Invalid project name: use a direct project directory name")
+    if not PROJECT_NAME_PATTERN.fullmatch(normalized) or normalized in {".", ".."}:
+        raise ValueError("Invalid project name: use letters, numbers, dots, dashes, or underscores")
 
     return normalized
 
@@ -161,12 +167,19 @@ def normalize_file_path(file: str) -> Path:
     normalized = file.strip()
     if not normalized:
         raise ValueError("File path is required")
+    if CONTROL_CHAR_PATTERN.search(normalized):
+        raise ValueError("Invalid file path: control characters are not allowed")
 
-    path = Path(normalized)
-    if path.is_absolute() or path.drive or any(part in {".", ".."} for part in path.parts):
+    normalized = normalized.replace("\\", "/")
+    path = PurePosixPath(normalized)
+    if path.is_absolute() or any(part in {"", ".", ".."} for part in path.parts):
         raise ValueError("Invalid file path: use a project-relative file path")
+    if any(":" in part for part in path.parts):
+        raise ValueError("Invalid file path: drive-qualified paths are not allowed")
+    if any(CONTROL_CHAR_PATTERN.search(part) for part in path.parts):
+        raise ValueError("Invalid file path: control characters are not allowed")
 
-    return path
+    return Path(*path.parts)
 
 
 def list_project_names() -> list[str]:
@@ -187,17 +200,28 @@ def list_project_names() -> list[str]:
 
 
 def find_files(root: Path, patterns: tuple[str, ...]) -> list[Path]:
+    root = root.resolve()
+    if not root.exists() or not root.is_dir():
+        raise ValueError(f"Invalid project root: {root}")
+
     found: list[Path] = []
     seen: set[Path] = set()
     for pattern in patterns:
         for path in root.rglob(pattern):
-            if not path.is_file():
+            try:
+                if not path.is_file():
+                    continue
+                resolved = path.resolve()
+            except OSError as exc:
+                logger.warning("Skipping inaccessible file during discovery %s: %s", path, exc)
                 continue
-            resolved = path.resolve()
+            if not is_relative_to(resolved, root):
+                logger.warning("Skipping file outside project root during discovery: %s", path)
+                continue
             if resolved in seen:
                 continue
             seen.add(resolved)
-            found.append(path)
+            found.append(resolved)
     return sorted(found, key=lambda path: str(path.relative_to(root)))
 
 
