@@ -305,6 +305,11 @@ def save_project_settings(data: dict) -> None:
         raise RuntimeError(f"Unable to save project settings: {PROJECT_SETTINGS_FILE}") from exc
 
 
+def api_error(action: str, exc: Exception) -> dict[str, bool | str]:
+    logger.exception("%s failed", action)
+    return {"error": True, "text": f"{action} failed: {exc}"}
+
+
 def safe_project_path(project: str) -> Path:
     ensure_dir(PROJECTS_DIR)
     normalized_project = normalize_project_name(project)
@@ -391,14 +396,26 @@ def load_cache() -> dict:
     if not PROJECT_CACHE_FILE.exists():
         return {}
     try:
-        return json.loads(PROJECT_CACHE_FILE.read_text(encoding="utf-8"))
-    except Exception:
+        data = json.loads(PROJECT_CACHE_FILE.read_text(encoding="utf-8"))
+        if isinstance(data, dict):
+            return data
+        logger.error("Project cache file must contain a JSON object: %s", PROJECT_CACHE_FILE)
+        return {}
+    except json.JSONDecodeError as exc:
+        logger.error("Invalid JSON in project cache file %s: %s", PROJECT_CACHE_FILE, exc)
+        return {}
+    except OSError:
+        logger.exception("Failed to read project cache file %s", PROJECT_CACHE_FILE)
         return {}
 
 
 def save_cache(data: dict) -> None:
-    ensure_dir(DATA_DIR)
-    PROJECT_CACHE_FILE.write_text(json.dumps(data, indent=2), encoding="utf-8")
+    try:
+        ensure_dir(DATA_DIR)
+        PROJECT_CACHE_FILE.write_text(json.dumps(data, indent=2), encoding="utf-8")
+    except OSError as exc:
+        logger.exception("Failed to save project cache file %s", PROJECT_CACHE_FILE)
+        raise RuntimeError(f"Unable to save project cache: {PROJECT_CACHE_FILE}") from exc
 
 
 def choose_model(model: str, prompt: str) -> str:
@@ -459,7 +476,8 @@ def ask_ollama(prompt: str, model: str) -> tuple[str, str, float]:
 def ask_with_fallback(prompt: str, model: str) -> tuple[str, str, float]:
     try:
         return ask_ollama(prompt, model)
-    except Exception:
+    except Exception as exc:
+        logger.warning("Ollama request failed for model %s, retrying fallback model: %s", model, exc)
         return ask_ollama(prompt, "qwen2.5-coder:1.5b")
 
 
@@ -470,10 +488,15 @@ def save_chat(role: str, content: str) -> None:
     if CHAT_FILE.exists():
         try:
             data = json.loads(CHAT_FILE.read_text(encoding="utf-8"))
-        except Exception:
+        except (OSError, json.JSONDecodeError) as exc:
+            logger.warning("Could not load chat history from %s, starting fresh: %s", CHAT_FILE, exc)
             data = []
     data.append(item)
-    CHAT_FILE.write_text(json.dumps(data[-100:], indent=2), encoding="utf-8")
+    try:
+        CHAT_FILE.write_text(json.dumps(data[-100:], indent=2), encoding="utf-8")
+    except OSError as exc:
+        logger.exception("Failed to save chat history to %s", CHAT_FILE)
+        raise RuntimeError(f"Unable to save chat history: {CHAT_FILE}") from exc
 
 
 def run_cmd(project: str, cmd: list[str], timeout: int = 60) -> str:
@@ -484,7 +507,8 @@ def run_cmd(project: str, cmd: list[str], timeout: int = 60) -> str:
     except subprocess.CalledProcessError as e:
         return e.output.strip()
     except Exception as e:
-        return str(e)
+        logger.exception("Command failed in project %s: %s", project, cmd)
+        return f"Command failed: {e}"
 
 
 def run_git(project: str, args: list[str]) -> str:
@@ -855,7 +879,7 @@ def api_diff_content(req: DiffContentRequest):
         text = "".join(diff)
         return {"text": text or "No changes."}
     except Exception as e:
-        return {"error": True, "text": str(e)}
+        return api_error("Diff preview", e)
 
 
 @app.post("/api/save-file")
@@ -868,7 +892,7 @@ def api_save_file(req: SaveFileRequest):
         target.write_text(req.content, encoding="utf-8")
         return {"text": f"Saved {req.file} with backup."}
     except Exception as e:
-        return {"error": True, "text": str(e)}
+        return api_error("Save file", e)
 
 
 @app.get("/api/git")
@@ -908,7 +932,7 @@ DIFF:
         LAST_DEBUG.update({"model": used_model, "elapsed": elapsed, "action": "commit_from_diff"})
         return {"text": answer, "model": used_model}
     except Exception as e:
-        return {"error": True, "text": str(e)}
+        return api_error("Commit message generation", e)
 
 
 @app.get("/api/models")
@@ -917,7 +941,8 @@ def api_models():
         r = requests.get(OLLAMA_TAGS_URL, timeout=10)
         r.raise_for_status()
         return {"models": [m["name"] for m in r.json().get("models", [])]}
-    except Exception:
+    except Exception as exc:
+        logger.warning("Failed to load Ollama models, returning fallback models: %s", exc)
         return {"models": ["qwen2.5-coder:7b", "qwen2.5-coder:1.5b"]}
 
 
@@ -951,7 +976,7 @@ def api_search(req: SearchRequest):
                 break
         return {"text": "\n".join(results) if results else "No results found."}
     except Exception as e:
-        return {"error": True, "text": str(e)}
+        return api_error("Search", e)
 
 
 def run_python_module(project: str, module: str, *args: str, timeout: int = 90) -> str:
@@ -1083,7 +1108,7 @@ def api_run_command(req: RunCommandRequest):
         output = commands[req.command](req.project)
         return {"text": output or "Command finished with no output."}
     except Exception as e:
-        return {"error": True, "text": str(e)}
+        return api_error("Run command", e)
 
 
 @app.post("/api/chat")
@@ -1099,7 +1124,7 @@ def api_chat(req: ChatRequest):
         LAST_DEBUG.update({"model": used_model, "elapsed": elapsed, "action": "chat"})
         return {"text": answer, "model": used_model, "elapsed": elapsed}
     except Exception as e:
-        return {"error": True, "text": str(e)}
+        return api_error("Chat", e)
 
 
 @app.post("/api/chat-stream")
@@ -1140,7 +1165,8 @@ def api_chat_stream(req: ChatRequest):
             LAST_DEBUG.update({"model": selected_model, "elapsed": elapsed, "action": "chat_stream"})
 
         except Exception as e:
-            yield f"\n[stream error] {e}"
+            logger.exception("Chat stream failed")
+            yield f"\n[stream error] Chat stream failed: {e}"
 
     return StreamingResponse(generate(), media_type="text/plain")
 
@@ -1160,7 +1186,7 @@ def project_action(req: ProjectActionRequest):
         LAST_DEBUG.update({"model": used_model, "elapsed": elapsed, "action": req.action})
         return {"text": answer, "action": req.action, "model": used_model}
     except Exception as e:
-        return {"error": True, "text": str(e)}
+        return api_error("Project action", e)
 
 
 @app.post("/api/cache-project")
@@ -1175,7 +1201,7 @@ def cache_project(req: ProjectActionRequest):
         LAST_DEBUG.update({"model": used_model, "elapsed": elapsed, "action": "cache_project"})
         return {"text": f"Cached project summary.\n\n{answer}", "model": used_model}
     except Exception as e:
-        return {"error": True, "text": str(e)}
+        return api_error("Cache project", e)
 
 
 @app.post("/api/file-action")
@@ -1195,7 +1221,7 @@ def file_action(req: FileReviewRequest):
         LAST_DEBUG.update({"model": used_model, "elapsed": elapsed, "action": f"file_{req.action}"})
         return {"text": answer, "file": req.file, "action": req.action, "model": used_model}
     except Exception as e:
-        return {"error": True, "text": str(e)}
+        return api_error("File action", e)
 
 
 @app.post("/api/save-readme")
@@ -1206,7 +1232,7 @@ def save_readme(req: SaveReadmeRequest):
         readme.write_text(req.content, encoding="utf-8")
         return {"text": f"Saved README.md to {readme}"}
     except Exception as e:
-        return {"error": True, "text": str(e)}
+        return api_error("Save README", e)
 
 
 
@@ -1215,7 +1241,7 @@ def api_detect(project: str = DEFAULT_PROJECT):
     try:
         return detect_project_type(project)
     except Exception as e:
-        return {"error": True, "text": str(e)}
+        return api_error("Project detection", e)
 
 
 @app.post("/api/explain-output")
@@ -1237,7 +1263,7 @@ Rules:
         LAST_DEBUG.update({"model": used_model, "elapsed": elapsed, "action": "explain_output"})
         return {"text": answer, "model": used_model}
     except Exception as e:
-        return {"error": True, "text": str(e)}
+        return api_error("Explain output", e)
 
 
 @app.post("/api/create-cpp-project")
@@ -1293,7 +1319,7 @@ def api_create_cpp_project(req: CreateCppProjectRequest):
             )
         }
     except Exception as e:
-        return {"error": True, "text": str(e)}
+        return api_error("Create C++ project", e)
 
 
 
@@ -1325,7 +1351,7 @@ def api_save_project_settings(req: ProjectSettingsRequest):
 
         return {"text": f"Saved settings for {req.project}"}
     except Exception as e:
-        return {"error": True, "text": str(e)}
+        return api_error("Save project settings", e)
 
 
 @app.post("/ask")
