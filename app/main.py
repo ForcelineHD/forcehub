@@ -3,6 +3,7 @@ import difflib
 import importlib.util
 import json
 import logging
+from logging.handlers import RotatingFileHandler
 import os
 import re
 import secrets
@@ -86,6 +87,10 @@ CPP_SOURCE_PATTERNS = ("*.cpp", "*.cc", "*.cxx")
 CPP_HEADER_PATTERNS = ("*.h", "*.hh", "*.hpp", "*.hxx")
 PROJECT_NAME_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 CONTROL_CHAR_PATTERN = re.compile(r"[\x00-\x1f\x7f]")
+SENSITIVE_LOG_PATTERN = re.compile(
+    r"(?i)(authorization\s*[:=]\s*(?:basic|bearer)\s+)[^\s,;]+"
+    r"|((?:password|passwd|pwd|token|secret|api[_-]?key)\s*[:=]\s*)[^\s,;]+"
+)
 
 app = FastAPI(title="ForceHub", description="Local AI dev dashboard.", version=APP_VERSION)
 
@@ -107,6 +112,20 @@ class AuthConfig:
     username: str
     password: str
     disabled: bool
+
+
+def redact_sensitive(value: object) -> str:
+    return SENSITIVE_LOG_PATTERN.sub(lambda match: f"{match.group(1) or match.group(2)}[REDACTED]", str(value))
+
+
+class SensitiveLogFilter(logging.Filter):
+    def filter(self, record: logging.LogRecord) -> bool:
+        record.msg = redact_sensitive(record.msg)
+        if isinstance(record.args, dict):
+            record.args = {key: redact_sensitive(value) for key, value in record.args.items()}
+        elif record.args:
+            record.args = tuple(redact_sensitive(arg) for arg in record.args)
+        return True
 
 
 class StatusResponse(BaseModel):
@@ -185,6 +204,38 @@ class ProjectSettingsRequest(BaseModel):
 
 def ensure_dir(path: Path) -> None:
     path.mkdir(parents=True, exist_ok=True)
+
+
+def configure_logging() -> None:
+    level_name = env_str("FORCEHUB_LOG_LEVEL", "INFO").upper()
+    level = getattr(logging, level_name, logging.INFO)
+    logger.setLevel(level)
+    if not any(isinstance(existing_filter, SensitiveLogFilter) for existing_filter in logger.filters):
+        logger.addFilter(SensitiveLogFilter())
+
+    log_file = env_str("FORCEHUB_LOG_FILE")
+    if not log_file:
+        return
+
+    log_path = Path(log_file).expanduser().resolve()
+    if any(getattr(handler, "_forcehub_log_file", None) == str(log_path) for handler in logger.handlers):
+        return
+
+    ensure_dir(log_path.parent)
+    handler = RotatingFileHandler(
+        log_path,
+        maxBytes=env_int("FORCEHUB_LOG_MAX_BYTES", 1_048_576, minimum=1),
+        backupCount=env_int("FORCEHUB_LOG_BACKUP_COUNT", 3, minimum=0),
+        encoding="utf-8",
+    )
+    handler._forcehub_log_file = str(log_path)
+    handler.setLevel(level)
+    handler.addFilter(SensitiveLogFilter())
+    handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s"))
+    logger.addHandler(handler)
+
+
+configure_logging()
 
 
 def is_relative_to(path: Path, other: Path) -> bool:

@@ -44,3 +44,7 @@ The app listens on `127.0.0.1:8000` by default.
 - `FORCEHUB_HOST`: bind host for the FastAPI server
 - `FORCEHUB_PORT`: bind port for the FastAPI server
 - `FORCEHUB_GIT_BIN`: explicit path to the `git` executable
+- `FORCEHUB_LOG_LEVEL`: app log level, default `INFO`
+- `FORCEHUB_LOG_FILE`: optional rotating log file path; unset keeps app logs off disk
+- `FORCEHUB_LOG_MAX_BYTES`: maximum size for one log file before rotation
+- `FORCEHUB_LOG_BACKUP_COUNT`: number of rotated log files to keep
