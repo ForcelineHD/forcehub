@@ -20,7 +20,7 @@ import requests
 from fastapi import FastAPI, Request
 from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import HTMLResponse, PlainTextResponse, StreamingResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 APP_NAME = "forcehub"
 APP_VERSION = "0.8.0"
@@ -162,20 +162,20 @@ class SearchRequest(BaseModel):
 
 class SaveReadmeRequest(BaseModel):
     project: str = DEFAULT_PROJECT
-    content: str
+    content: str = Field(max_length=MAX_FILE_CHARS)
 
 
 class SaveFileRequest(BaseModel):
     project: str = DEFAULT_PROJECT
     file: str
-    content: str
+    content: str = Field(max_length=MAX_FILE_CHARS)
     backup: bool = True
 
 
 class DiffContentRequest(BaseModel):
     project: str = DEFAULT_PROJECT
     file: str
-    content: str
+    content: str = Field(max_length=MAX_FILE_CHARS)
 
 
 class RunCommandRequest(BaseModel):
@@ -1059,6 +1059,32 @@ def diff_content_response(req: DiffContentRequest) -> dict[str, str | bool]:
     return {"text": text or "No changes."}
 
 
+def create_file_backup(target: Path) -> Path:
+    backup = target.with_suffix(target.suffix + f".bak-{datetime.now().strftime('%Y%m%d-%H%M%S')}")
+    try:
+        shutil.copy2(target, backup)
+    except OSError as exc:
+        logger.exception("Failed to create backup for %s at %s", target, backup)
+        raise RuntimeError(f"Unable to create backup for {target.name}") from exc
+    return backup
+
+
+def write_text_file(target: Path, content: str) -> None:
+    temp = target.with_name(f".{target.name}.tmp-{datetime.now().strftime('%Y%m%d-%H%M%S')}")
+    try:
+        temp.write_text(content, encoding="utf-8")
+        temp.replace(target)
+    except OSError as exc:
+        logger.exception("Failed to write file %s", target)
+        raise RuntimeError(f"Unable to write file: {target.name}") from exc
+    finally:
+        try:
+            if temp.exists():
+                temp.unlink()
+        except OSError as exc:
+            logger.warning("Unable to remove temporary file %s: %s", temp, exc)
+
+
 @app.get("/api/files")
 async def api_files(project: str = DEFAULT_PROJECT):
     try:
@@ -1089,10 +1115,10 @@ def api_save_file(req: SaveFileRequest):
     try:
         target = safe_file_path(req.project, req.file)
         if req.backup:
-            backup = target.with_suffix(target.suffix + f".bak-{datetime.now().strftime('%Y%m%d-%H%M%S')}")
-            shutil.copy2(target, backup)
-        target.write_text(req.content, encoding="utf-8")
-        return {"text": f"Saved {req.file} with backup."}
+            create_file_backup(target)
+        write_text_file(target, req.content)
+        backup_text = " with backup" if req.backup else ""
+        return {"text": f"Saved {req.file}{backup_text}."}
     except Exception as e:
         return api_error("Save file", e)
 
@@ -1438,7 +1464,7 @@ def save_readme(req: SaveReadmeRequest):
     try:
         root = safe_project_path(req.project)
         readme = root / "README.md"
-        readme.write_text(req.content, encoding="utf-8")
+        write_text_file(readme, req.content)
         return {"text": f"Saved README.md to {readme}"}
     except Exception as e:
         return api_error("Save README", e)
