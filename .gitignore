@@ -21,3 +21,7 @@ build/
 data/agents.json
 data/agent_token.txt
 app/main.py.bak.agent_api_*
+
+# ForceHub runtime data / secrets
+data/
+logs/
