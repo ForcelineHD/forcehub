@@ -616,6 +616,10 @@ def rate_limit_result(request: Request) -> tuple[bool, int]:
 
 @app.middleware("http")
 async def forcehub_basic_auth(request: Request, call_next):
+    # FORCEHUB_AGENT_AUTH_BYPASS
+    if request.url.path.startswith("/api/agents"):
+        return await call_next(request)
+
     if request.url.path.startswith("/status"):
         return await call_next(request)
 
@@ -632,6 +636,10 @@ async def forcehub_basic_auth(request: Request, call_next):
 
 @app.middleware("http")
 async def forcehub_rate_limit(request: Request, call_next):
+    # FORCEHUB_AGENT_AUTH_BYPASS
+    if request.url.path.startswith("/api/agents"):
+        return await call_next(request)
+
     limited, retry_after = rate_limit_result(request)
     if limited:
         return PlainTextResponse(
@@ -2025,3 +2033,121 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
+
+# === FORCEHUB_AGENT_API_BEGIN ===
+
+import os as _fh_os
+import json as _fh_json
+import time as _fh_time
+from pathlib import Path as _fh_Path
+from typing import Any as _fh_Any, Dict as _fh_Dict
+
+from fastapi import Header as _fh_Header, HTTPException as _fh_HTTPException, Request as _fh_Request
+
+_FH_AGENT_DATA_FILE = _fh_Path(__file__).resolve().parent.parent / "data" / "agents.json"
+
+
+def _fh_agent_expected_token() -> str:
+    return (_fh_os.getenv("FORCEHUB_AGENT_TOKEN") or "").strip()
+
+
+def _fh_require_agent_token(x_forcehub_agent_token: str | None) -> None:
+    expected = _fh_agent_expected_token()
+    if not expected:
+        raise _fh_HTTPException(status_code=503, detail="ForceHub agent token is not configured")
+
+    if not x_forcehub_agent_token or x_forcehub_agent_token.strip() != expected:
+        raise _fh_HTTPException(status_code=401, detail="Invalid ForceHub agent token")
+
+
+def _fh_load_agents() -> _fh_Dict[str, _fh_Any]:
+    _FH_AGENT_DATA_FILE.parent.mkdir(parents=True, exist_ok=True)
+
+    if not _FH_AGENT_DATA_FILE.exists():
+        return {}
+
+    try:
+        with _FH_AGENT_DATA_FILE.open("r", encoding="utf-8") as f:
+            data = _fh_json.load(f)
+            return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def _fh_save_agents(data: _fh_Dict[str, _fh_Any]) -> None:
+    _FH_AGENT_DATA_FILE.parent.mkdir(parents=True, exist_ok=True)
+
+    tmp = _FH_AGENT_DATA_FILE.with_suffix(".json.tmp")
+    with tmp.open("w", encoding="utf-8") as f:
+        _fh_json.dump(data, f, indent=2, sort_keys=True)
+        f.write("\n")
+
+    tmp.replace(_FH_AGENT_DATA_FILE)
+
+
+@app.post("/api/agents/checkin")
+async def forcehub_agent_checkin(
+    payload: _fh_Dict[str, _fh_Any],
+    request: _fh_Request,
+    x_forcehub_agent_token: str | None = _fh_Header(default=None, alias="X-ForceHub-Agent-Token"),
+):
+    _fh_require_agent_token(x_forcehub_agent_token)
+
+    hostname = str(payload.get("hostname") or "unknown").strip()[:128]
+    if not hostname:
+        hostname = "unknown"
+
+    now = int(_fh_time.time())
+    client_host = request.client.host if request.client else "unknown"
+
+    agents = _fh_load_agents()
+    agents[hostname] = {
+        "hostname": hostname,
+        "last_checkin_unix": now,
+        "client_host": client_host,
+        "payload": payload,
+    }
+    _fh_save_agents(agents)
+
+    return {
+        "ok": True,
+        "hostname": hostname,
+        "last_checkin_unix": now,
+    }
+
+
+@app.get("/api/agents")
+async def forcehub_agents_list(
+    x_forcehub_agent_token: str | None = _fh_Header(default=None, alias="X-ForceHub-Agent-Token"),
+):
+    _fh_require_agent_token(x_forcehub_agent_token)
+
+    agents = _fh_load_agents()
+    return {
+        "ok": True,
+        "count": len(agents),
+        "agents": sorted(agents.values(), key=lambda x: x.get("hostname", "")),
+    }
+
+
+@app.get("/api/agents/{hostname}")
+async def forcehub_agent_get(
+    hostname: str,
+    x_forcehub_agent_token: str | None = _fh_Header(default=None, alias="X-ForceHub-Agent-Token"),
+):
+    _fh_require_agent_token(x_forcehub_agent_token)
+
+    agents = _fh_load_agents()
+    item = agents.get(hostname)
+
+    if not item:
+        raise _fh_HTTPException(status_code=404, detail="Agent not found")
+
+    return {
+        "ok": True,
+        "agent": item,
+    }
+
+# === FORCEHUB_AGENT_API_END ===
+

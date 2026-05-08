@@ -19,6 +19,16 @@ fi
 source "$VENV/bin/activate"
 mkdir -p "$LOG_DIR"
 
+TOKEN_FILE="$PROJECT_DIR/data/agent_token.txt"
+mkdir -p "$PROJECT_DIR/data"
+
+if [ ! -f "$TOKEN_FILE" ]; then
+  openssl rand -hex 32 > "$TOKEN_FILE"
+  chmod 600 "$TOKEN_FILE"
+fi
+
+export FORCEHUB_AGENT_TOKEN="$(cat "$TOKEN_FILE")"
+
 http_code() {
   curl -s -o /dev/null -w "%{http_code}" "http://$HOST:$PORT/" || true
 }
