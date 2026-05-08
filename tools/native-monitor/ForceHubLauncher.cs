@@ -23,6 +23,7 @@ public class ForceHubLauncher : Form
     private Label liveCard;
     private DataGridView agentsGrid;
     private DataGridView tasksGrid;
+    private DataGridView networkGrid;
     private Timer refreshTimer;
 
     private Color Bg = Color.FromArgb(8, 12, 24);
@@ -175,7 +176,7 @@ public class ForceHubLauncher : Form
         agentsGrid.Width = agentsPanel.Width - 36;
         agentsGrid.Height = agentsPanel.Height - 70;
         agentsGrid.Anchor = AnchorStyles.Top | AnchorStyles.Bottom | AnchorStyles.Left | AnchorStyles.Right;
-        agentsGrid.SelectionChanged += delegate { LoadSelectedAgentTasks(); };
+        agentsGrid.SelectionChanged += delegate { LoadSelectedAgentDetails(); };
         agentsPanel.Controls.Add(agentsGrid);
 
         agentsGrid.Columns.Add("hostname", "Hostname");
@@ -186,6 +187,9 @@ public class ForceHubLauncher : Form
         agentsGrid.Columns.Add("cpu", "CPU %");
         agentsGrid.Columns.Add("mem", "Memory");
         agentsGrid.Columns.Add("threads", "Threads");
+        agentsGrid.Columns.Add("processes", "Processes");
+        agentsGrid.Columns.Add("uptime", "Uptime");
+        agentsGrid.Columns.Add("network", "Network");
         agentsGrid.Columns.Add("disks", "Disks");
         agentsGrid.Columns.Add("checkin", "Last Check-In");
 
@@ -197,11 +201,21 @@ public class ForceHubLauncher : Form
         agentsGrid.Columns["cpu"].Width = 75;
         agentsGrid.Columns["mem"].Width = 160;
         agentsGrid.Columns["threads"].Width = 75;
+        agentsGrid.Columns["processes"].Width = 85;
+        agentsGrid.Columns["uptime"].Width = 120;
+        agentsGrid.Columns["network"].Width = 240;
         agentsGrid.Columns["disks"].Width = 280;
         agentsGrid.Columns["checkin"].Width = 150;
 
-        Panel tasksPanel = MakePanel(315, 565, ClientSize.Width - 345, ClientSize.Height - 595, Panel);
-        tasksPanel.Anchor = AnchorStyles.Top | AnchorStyles.Bottom | AnchorStyles.Left | AnchorStyles.Right;
+        int bottomTop = 565;
+        int bottomHeight = ClientSize.Height - 595;
+        int bottomWidth = ClientSize.Width - 345;
+        int gap = 18;
+        int leftWidth = (bottomWidth - gap) / 2;
+        int rightWidth = bottomWidth - leftWidth - gap;
+
+        Panel tasksPanel = MakePanel(315, bottomTop, leftWidth, bottomHeight, Panel);
+        tasksPanel.Anchor = AnchorStyles.Top | AnchorStyles.Bottom | AnchorStyles.Left;
         Controls.Add(tasksPanel);
 
         Label tasksTitle = SectionTitle("Top Tasks", 18, 12);
@@ -220,10 +234,35 @@ public class ForceHubLauncher : Form
         tasksGrid.Columns.Add("cpu", "CPU %");
         tasksGrid.Columns.Add("mem", "Memory MB");
 
-        tasksGrid.Columns["pid"].Width = 100;
-        tasksGrid.Columns["name"].Width = 430;
-        tasksGrid.Columns["cpu"].Width = 100;
-        tasksGrid.Columns["mem"].Width = 130;
+        tasksGrid.Columns["pid"].Width = 80;
+        tasksGrid.Columns["name"].Width = 300;
+        tasksGrid.Columns["cpu"].Width = 80;
+        tasksGrid.Columns["mem"].Width = 100;
+
+        Panel networkPanel = MakePanel(315 + leftWidth + gap, bottomTop, rightWidth, bottomHeight, Panel);
+        networkPanel.Anchor = AnchorStyles.Top | AnchorStyles.Bottom | AnchorStyles.Left | AnchorStyles.Right;
+        Controls.Add(networkPanel);
+
+        Label networkTitle = SectionTitle("Network Adapters", 18, 12);
+        networkPanel.Controls.Add(networkTitle);
+
+        networkGrid = MakeGrid();
+        networkGrid.Left = 18;
+        networkGrid.Top = 52;
+        networkGrid.Width = networkPanel.Width - 36;
+        networkGrid.Height = networkPanel.Height - 70;
+        networkGrid.Anchor = AnchorStyles.Top | AnchorStyles.Bottom | AnchorStyles.Left | AnchorStyles.Right;
+        networkPanel.Controls.Add(networkGrid);
+
+        networkGrid.Columns.Add("name", "Adapter");
+        networkGrid.Columns.Add("status", "Status");
+        networkGrid.Columns.Add("mtu", "MTU");
+        networkGrid.Columns.Add("ips", "IP Addresses");
+
+        networkGrid.Columns["name"].Width = 210;
+        networkGrid.Columns["status"].Width = 75;
+        networkGrid.Columns["mtu"].Width = 65;
+        networkGrid.Columns["ips"].Width = 360;
     }
 
     private Panel MakePanel(int x, int y, int w, int h, Color bg)
@@ -432,10 +471,13 @@ public class ForceHubLauncher : Form
 
                 string mem = FormatMemory(payload);
                 string threads = GetLong(payload, "cpu_threads").ToString();
+                string processes = GetLong(payload, "process_count").ToString();
+                string uptime = FormatDuration(GetLong(payload, "uptime_seconds"));
+                string network = FormatNetworkSummary(payload);
                 string disks = FormatDisks(payload);
                 string checkin = FormatUnix(last);
 
-                int idx = agentsGrid.Rows.Add(hostname, statusText, agentName, version, os, cpu.ToString("0.0"), mem, threads, disks, checkin);
+                int idx = agentsGrid.Rows.Add(hostname, statusText, agentName, version, os, cpu.ToString("0.0"), mem, threads, processes, uptime, network, disks, checkin);
                 agentsGrid.Rows[idx].Tag = payload;
 
                 agentsGrid.Rows[idx].Cells["status"].Style.ForeColor = recent ? Green : Red;
@@ -450,7 +492,7 @@ public class ForceHubLauncher : Form
             if (agentsGrid.Rows.Count > 0 && agentsGrid.SelectedRows.Count == 0)
                 agentsGrid.Rows[0].Selected = true;
 
-            LoadSelectedAgentTasks();
+            LoadSelectedAgentDetails();
 
             agentCard.Text = agents.Count.ToString();
             liveCard.Text = online + " Online";
@@ -479,14 +521,97 @@ public class ForceHubLauncher : Form
         }
     }
 
-    private void LoadSelectedAgentTasks()
+    private string FormatDuration(long seconds)
+    {
+        if (seconds <= 0) return "";
+
+        long days = seconds / 86400;
+        long hours = (seconds % 86400) / 3600;
+        long minutes = (seconds % 3600) / 60;
+
+        if (days > 0) return days + "d " + hours + "h";
+        if (hours > 0) return hours + "h " + minutes + "m";
+        return minutes + "m";
+    }
+
+    private string FormatNetworkSummary(Dictionary<string, object> payload)
+    {
+        Dictionary<string, object> network = GetDict(payload, "network");
+        object adaptersObj;
+        if (!network.TryGetValue("adapters", out adaptersObj)) return "";
+
+        ArrayList adapters = adaptersObj as ArrayList;
+        if (adapters == null) return "";
+
+        int up = 0;
+        List<string> important = new List<string>();
+
+        foreach (object item in adapters)
+        {
+            Dictionary<string, object> a = item as Dictionary<string, object>;
+            if (a == null) continue;
+
+            bool isUp = GetBool(a, "is_up");
+            if (isUp) up++;
+
+            string name = GetStr(a, "name");
+            if (name.IndexOf("VMnet8", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                name.IndexOf("NordLynx", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                name.IndexOf("Tailscale", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                name.Equals("Ethernet", StringComparison.OrdinalIgnoreCase))
+            {
+                important.Add(name + ":" + (isUp ? "up" : "down"));
+            }
+        }
+
+        string prefix = up + " up / " + adapters.Count + " total";
+        if (important.Count == 0) return prefix;
+        return prefix + " | " + String.Join(", ", important.ToArray());
+    }
+
+    private void LoadSelectedAgentNetwork(Dictionary<string, object> payload)
+    {
+        Dictionary<string, object> network = GetDict(payload, "network");
+        object adaptersObj;
+        if (!network.TryGetValue("adapters", out adaptersObj)) return;
+
+        ArrayList adapters = adaptersObj as ArrayList;
+        if (adapters == null) return;
+
+        foreach (object item in adapters)
+        {
+            Dictionary<string, object> a = item as Dictionary<string, object>;
+            if (a == null) continue;
+
+            string name = GetStr(a, "name");
+            bool isUp = GetBool(a, "is_up");
+            string statusText = isUp ? "Up" : "Down";
+            string mtu = GetLong(a, "mtu").ToString();
+            string ips = FormatStringArray(a, "addresses");
+
+            int idx = networkGrid.Rows.Add(name, statusText, mtu, ips);
+            networkGrid.Rows[idx].Cells["status"].Style.ForeColor = isUp ? Green : Red;
+
+            if (name.IndexOf("VMnet8", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                name.IndexOf("NordLynx", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                name.IndexOf("Tailscale", StringComparison.OrdinalIgnoreCase) >= 0)
+            {
+                networkGrid.Rows[idx].DefaultCellStyle.ForeColor = Color.FromArgb(147, 197, 253);
+            }
+        }
+    }
+
+    private void LoadSelectedAgentDetails()
     {
         tasksGrid.Rows.Clear();
+        networkGrid.Rows.Clear();
 
         if (agentsGrid.SelectedRows.Count == 0) return;
 
         Dictionary<string, object> payload = agentsGrid.SelectedRows[0].Tag as Dictionary<string, object>;
         if (payload == null) return;
+
+        LoadSelectedAgentNetwork(payload);
 
         object tasksObj;
         if (!payload.TryGetValue("top_tasks", out tasksObj)) return;
@@ -539,6 +664,33 @@ public class ForceHubLauncher : Form
         object val;
         if (!d.TryGetValue(key, out val) || val == null) return 0;
         try { return Convert.ToDouble(val); } catch { return 0; }
+    }
+
+    private bool GetBool(Dictionary<string, object> d, string key)
+    {
+        if (d == null) return false;
+        object val;
+        if (!d.TryGetValue(key, out val) || val == null) return false;
+        try { return Convert.ToBoolean(val); } catch { return false; }
+    }
+
+    private string FormatStringArray(Dictionary<string, object> d, string key)
+    {
+        if (d == null) return "";
+        object val;
+        if (!d.TryGetValue(key, out val) || val == null) return "";
+
+        ArrayList arr = val as ArrayList;
+        if (arr == null) return Convert.ToString(val);
+
+        List<string> parts = new List<string>();
+        foreach (object item in arr)
+        {
+            if (item == null) continue;
+            parts.Add(Convert.ToString(item));
+        }
+
+        return String.Join(", ", parts.ToArray());
     }
 
     private string FormatMemory(Dictionary<string, object> payload)
