@@ -2151,3 +2151,180 @@ async def forcehub_agent_get(
 
 # === FORCEHUB_AGENT_API_END ===
 
+
+# === FORCEHUB_AGENTS_DASHBOARD_BEGIN ===
+
+from fastapi.responses import HTMLResponse as _fh_HTMLResponse
+import html as _fh_html
+import datetime as _fh_datetime
+
+
+def _fh_agent_dashboard_html() -> str:
+    agents = _fh_load_agents()
+    rows = []
+
+    now = int(_fh_time.time())
+
+    for item in sorted(agents.values(), key=lambda x: x.get("hostname", "")):
+        payload = item.get("payload") or {}
+        hostname = str(item.get("hostname") or payload.get("hostname") or "unknown")
+        os_name = str(payload.get("os") or "unknown")
+        target = str(payload.get("target") or "unknown")
+        arch = str(payload.get("arch") or "unknown")
+        cpu_threads = str(payload.get("cpu_threads") or "unknown")
+        ram_mb = payload.get("ram_mb") or 0
+        ram_gb = round(int(ram_mb) / 1024, 1) if str(ram_mb).isdigit() else "unknown"
+        last_unix = int(item.get("last_checkin_unix") or 0)
+        age = max(0, now - last_unix) if last_unix else 0
+
+        if age < 120:
+            status = "Online"
+        elif age < 3600:
+            status = "Recent"
+        else:
+            status = "Stale"
+
+        last_seen = (
+            _fh_datetime.datetime.fromtimestamp(last_unix).strftime("%Y-%m-%d %H:%M:%S")
+            if last_unix else "never"
+        )
+
+        disks = payload.get("disks") or []
+        disk_text = ", ".join(
+            f"{d.get('mount', '?')} {d.get('free_gb', '?')}GB free / {d.get('total_gb', '?')}GB"
+            for d in disks
+            if isinstance(d, dict)
+        ) or "unknown"
+
+        rows.append(f"""
+        <tr>
+          <td><strong>{_fh_html.escape(hostname)}</strong></td>
+          <td>{_fh_html.escape(status)}</td>
+          <td>{_fh_html.escape(os_name)}</td>
+          <td>{_fh_html.escape(target)} / {_fh_html.escape(arch)}</td>
+          <td>{_fh_html.escape(str(ram_gb))} GB</td>
+          <td>{_fh_html.escape(cpu_threads)}</td>
+          <td>{_fh_html.escape(disk_text)}</td>
+          <td>{_fh_html.escape(last_seen)}</td>
+        </tr>
+        """)
+
+    body = "\n".join(rows) if rows else """
+        <tr>
+          <td colspan="8" class="empty">No agents checked in yet.</td>
+        </tr>
+    """
+
+    return f"""<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>ForceHub Agents</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta http-equiv="refresh" content="15">
+  <style>
+    body {{
+      margin: 0;
+      font-family: Arial, sans-serif;
+      background: #0b1020;
+      color: #e5e7eb;
+    }}
+    .wrap {{
+      max-width: 1200px;
+      margin: 40px auto;
+      padding: 0 20px;
+    }}
+    h1 {{
+      margin-bottom: 6px;
+      font-size: 28px;
+    }}
+    .sub {{
+      color: #9ca3af;
+      margin-bottom: 24px;
+    }}
+    .card {{
+      background: #111827;
+      border: 1px solid #1f2937;
+      border-radius: 14px;
+      overflow: hidden;
+      box-shadow: 0 20px 40px rgba(0,0,0,.25);
+    }}
+    table {{
+      width: 100%;
+      border-collapse: collapse;
+    }}
+    th, td {{
+      padding: 14px 16px;
+      text-align: left;
+      border-bottom: 1px solid #1f2937;
+      vertical-align: top;
+      font-size: 14px;
+    }}
+    th {{
+      background: #020617;
+      color: #cbd5e1;
+      font-size: 12px;
+      text-transform: uppercase;
+      letter-spacing: .06em;
+    }}
+    tr:hover td {{
+      background: #0f172a;
+    }}
+    .empty {{
+      color: #9ca3af;
+      text-align: center;
+      padding: 30px;
+    }}
+    .actions {{
+      margin-top: 18px;
+      color: #9ca3af;
+      font-size: 13px;
+    }}
+    code {{
+      background: #020617;
+      padding: 3px 6px;
+      border-radius: 6px;
+      color: #93c5fd;
+    }}
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <h1>ForceHub Agents</h1>
+    <div class="sub">Endpoint inventory from ForceHubAgent.exe. Auto-refreshes every 15 seconds.</div>
+
+    <div class="card">
+      <table>
+        <thead>
+          <tr>
+            <th>Hostname</th>
+            <th>Status</th>
+            <th>OS</th>
+            <th>Target</th>
+            <th>RAM</th>
+            <th>CPU Threads</th>
+            <th>Disks</th>
+            <th>Last Check-in</th>
+          </tr>
+        </thead>
+        <tbody>
+          {body}
+        </tbody>
+      </table>
+    </div>
+
+    <div class="actions">
+      Agent check-in command from Windows:
+      <code>ForceHubAgent.exe --json | ssh ubuntu-vm "./scripts/forcehub_agent_post.sh"</code>
+    </div>
+  </div>
+</body>
+</html>"""
+
+
+@app.get("/agents", response_class=_fh_HTMLResponse)
+async def forcehub_agents_dashboard():
+    return _fh_HTMLResponse(_fh_agent_dashboard_html())
+
+# === FORCEHUB_AGENTS_DASHBOARD_END ===
+
