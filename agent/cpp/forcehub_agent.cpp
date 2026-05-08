@@ -8,7 +8,6 @@
 #include <algorithm>
 #include <iomanip>
 #include <map>
-#include <chrono>
 #include <cstring>
 
 #ifdef _WIN32
@@ -61,13 +60,6 @@ static std::string num1(double value) {
 
 #ifdef _WIN32
 
-static uint64_t filetime_to_u64(const FILETIME& ft) {
-    ULARGE_INTEGER uli{};
-    uli.LowPart = ft.dwLowDateTime;
-    uli.HighPart = ft.dwHighDateTime;
-    return uli.QuadPart;
-}
-
 struct ProcSample {
     DWORD pid = 0;
     std::string name;
@@ -75,35 +67,21 @@ struct ProcSample {
     uint64_t memory_bytes = 0;
 };
 
+static uint64_t filetime_to_u64(const FILETIME& ft) {
+    ULARGE_INTEGER uli{};
+    uli.LowPart = ft.dwLowDateTime;
+    uli.HighPart = ft.dwHighDateTime;
+    return uli.QuadPart;
+}
+
 static std::string wide_to_utf8(const wchar_t* ws) {
     if (!ws || !*ws) return "unknown";
 
-    int size_needed = WideCharToMultiByte(
-        CP_UTF8,
-        0,
-        ws,
-        -1,
-        nullptr,
-        0,
-        nullptr,
-        nullptr
-    );
+    int needed = WideCharToMultiByte(CP_UTF8, 0, ws, -1, nullptr, 0, nullptr, nullptr);
+    if (needed <= 0) return "unknown";
 
-    if (size_needed <= 0) return "unknown";
-
-    std::string out(static_cast<size_t>(size_needed - 1), '\0');
-
-    WideCharToMultiByte(
-        CP_UTF8,
-        0,
-        ws,
-        -1,
-        out.data(),
-        size_needed,
-        nullptr,
-        nullptr
-    );
-
+    std::string out(static_cast<size_t>(needed - 1), '\0');
+    WideCharToMultiByte(CP_UTF8, 0, ws, -1, out.data(), needed, nullptr, nullptr);
     return out;
 }
 
@@ -129,23 +107,23 @@ static std::string get_os_string() {
 
     HMODULE ntdll = GetModuleHandleA("ntdll.dll");
     if (ntdll) {
-        auto rtl_get_version = reinterpret_cast<RtlGetVersionPtr>(
-            reinterpret_cast<void*>(GetProcAddress(ntdll, "RtlGetVersion"))
-        );
+        auto proc = GetProcAddress(ntdll, "RtlGetVersion");
+        if (proc) {
+            auto rtl_get_version = reinterpret_cast<RtlGetVersionPtr>(reinterpret_cast<void*>(proc));
+            if (rtl_get_version(&osvi) == 0) {
+                std::ostringstream ss;
 
-        if (rtl_get_version && rtl_get_version(&osvi) == 0) {
-            std::ostringstream ss;
+                if (osvi.dwMajorVersion == 10 && osvi.dwBuildNumber >= 22000) {
+                    ss << "Windows 11";
+                } else if (osvi.dwMajorVersion == 10) {
+                    ss << "Windows 10";
+                } else {
+                    ss << "Windows " << osvi.dwMajorVersion << "." << osvi.dwMinorVersion;
+                }
 
-            if (osvi.dwMajorVersion == 10 && osvi.dwBuildNumber >= 22000) {
-                ss << "Windows 11";
-            } else if (osvi.dwMajorVersion == 10) {
-                ss << "Windows 10";
-            } else {
-                ss << "Windows " << osvi.dwMajorVersion << "." << osvi.dwMinorVersion;
+                ss << " build " << osvi.dwBuildNumber;
+                return ss.str();
             }
-
-            ss << " build " << osvi.dwBuildNumber;
-            return ss.str();
         }
     }
 
@@ -194,7 +172,7 @@ static std::string get_disks_json() {
     ss << "[";
 
     bool first = true;
-    for (char* drive = drives; drive && *drive; drive += strlen(drive) + 1) {
+    for (char* drive = drives; drive && *drive; drive += std::strlen(drive) + 1) {
         ULARGE_INTEGER freeBytesAvailable{}, totalBytes{}, totalFreeBytes{};
 
         if (GetDiskFreeSpaceExA(drive, &freeBytesAvailable, &totalBytes, &totalFreeBytes)) {
@@ -211,6 +189,23 @@ static std::string get_disks_json() {
 
     ss << "]";
     return ss.str();
+}
+
+static uint64_t system_total_100ns() {
+    FILETIME idle{}, kernel{}, user{};
+    if (!GetSystemTimes(&idle, &kernel, &user)) return 0;
+    return filetime_to_u64(kernel) + filetime_to_u64(user);
+}
+
+static uint64_t system_busy_100ns() {
+    FILETIME idle{}, kernel{}, user{};
+    if (!GetSystemTimes(&idle, &kernel, &user)) return 0;
+
+    uint64_t k = filetime_to_u64(kernel);
+    uint64_t u = filetime_to_u64(user);
+    uint64_t i = filetime_to_u64(idle);
+
+    return (k + u) > i ? (k + u - i) : 0;
 }
 
 static std::map<DWORD, ProcSample> sample_processes() {
@@ -251,27 +246,7 @@ static std::map<DWORD, ProcSample> sample_processes() {
     return out;
 }
 
-static uint64_t system_busy_100ns() {
-    FILETIME idle{}, kernel{}, user{};
-    if (!GetSystemTimes(&idle, &kernel, &user)) return 0;
-
-    uint64_t k = filetime_to_u64(kernel);
-    uint64_t u = filetime_to_u64(user);
-    uint64_t i = filetime_to_u64(idle);
-
-    return (k + u) - i;
-}
-
-static uint64_t system_total_100ns() {
-    FILETIME idle{}, kernel{}, user{};
-    if (!GetSystemTimes(&idle, &kernel, &user)) return 0;
-
-    return filetime_to_u64(kernel) + filetime_to_u64(user);
-}
-
 static std::string get_live_metrics_json() {
-    unsigned int cpu_threads = get_cpu_threads();
-
     auto mem = get_memory_status();
 
     uint64_t total_before = system_total_100ns();
@@ -298,7 +273,10 @@ static std::string get_live_metrics_json() {
 
     std::vector<ProcLive> live;
 
-    for (const auto& [pid, after] : proc_after) {
+    for (const auto& item : proc_after) {
+        DWORD pid = item.first;
+        const ProcSample& after = item.second;
+
         auto it = proc_before.find(pid);
         if (it == proc_before.end()) continue;
 
@@ -306,10 +284,9 @@ static std::string get_live_metrics_json() {
             ? after.cpu_100ns - it->second.cpu_100ns
             : 0;
 
-        double proc_cpu = 0.0;
-        if (total_delta && cpu_threads) {
-            proc_cpu = (static_cast<double>(cpu_delta) * 100.0) / static_cast<double>(total_delta);
-        }
+        double proc_cpu = total_delta
+            ? (static_cast<double>(cpu_delta) * 100.0 / static_cast<double>(total_delta))
+            : 0.0;
 
         live.push_back({
             pid,
@@ -468,7 +445,6 @@ static void print_json() {
     ss << "\"uptime_seconds\":" << get_uptime_seconds() << ",";
     ss << "\"disks\":" << get_disks_json() << ",";
 
-    // inject metrics object fields without surrounding braces
     if (metrics.size() >= 2 && metrics.front() == '{' && metrics.back() == '}') {
         ss << metrics.substr(1, metrics.size() - 2);
     } else {
@@ -487,15 +463,13 @@ static void print_json() {
 
 static void print_help() {
     std::cout
-        << "ForceHubAgent 0.2.0\n"
-        << "\n"
+        << "ForceHubAgent 0.2.0\n\n"
         << "Usage:\n"
         << "  ForceHubAgent.exe --json\n"
-        << "  ForceHubAgent.exe --help\n"
-        << "\n"
+        << "  ForceHubAgent.exe --help\n\n"
         << "Description:\n"
         << "  Local diagnostics agent for ForceHub.\n"
-        << "  Prints system inventory, CPU usage, memory usage, disks, and top tasks as JSON.\n";
+        << "  Prints inventory, CPU usage, memory usage, disks, and top tasks as JSON.\n";
 }
 
 int main(int argc, char* argv[]) {

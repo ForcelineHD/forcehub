@@ -20,6 +20,7 @@ x86_64-w64-mingw32-g++ \
   -static \
   -Wall \
   -Wextra \
+  -Wno-cast-function-type \
   -o "$OUT" \
   "$SRC" \
   -lpsapi \
