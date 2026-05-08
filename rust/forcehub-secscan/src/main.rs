@@ -74,6 +74,13 @@ fn is_auth_disabled_assignment(line: &str) -> bool {
         || compact.contains("AUTH_DISABLED:-1")
 }
 
+fn should_skip_content_rules(rel: &str) -> bool {
+    let p = rel.replace('\\', "/");
+
+    // The scanner source intentionally contains risky patterns as detection rules.
+    p == "rust/forcehub-secscan/src/main.rs"
+}
+
 fn is_direct_secret_assignment(line: &str) -> bool {
     let t = strip_export(line);
     let lower = t.to_ascii_lowercase();
@@ -152,6 +159,10 @@ fn scan_path_rules(rel: &str, findings: &mut Vec<Finding>) {
 }
 
 fn scan_content_rules(rel: &str, content: &str, findings: &mut Vec<Finding>) {
+    if should_skip_content_rules(rel) {
+        return;
+    }
+
     let p = rel.replace('\\', "/");
 
     for (idx, line) in content.lines().enumerate() {
