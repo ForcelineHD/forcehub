@@ -6,6 +6,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -24,7 +25,7 @@ import (
 
 const (
 	agentName    = "ForceHubAgent-Go"
-	agentVersion = "0.3.0-go"
+	agentVersion = "0.4.0-go"
 )
 
 type DiskInfo struct {
@@ -40,25 +41,42 @@ type TaskInfo struct {
 	MemoryMB uint64  `json:"memory_mb"`
 }
 
+type NetworkAdapter struct {
+	Name         string   `json:"name"`
+	Index        int      `json:"index"`
+	MTU          int      `json:"mtu"`
+	HardwareAddr string   `json:"hardware_addr"`
+	Flags        []string `json:"flags"`
+	Addresses    []string `json:"addresses"`
+	IsUp         bool     `json:"is_up"`
+}
+
+type NetworkInfo struct {
+	Adapters []NetworkAdapter `json:"adapters"`
+}
+
 type Payload struct {
-	Agent             string     `json:"agent"`
-	Version           string     `json:"version"`
-	Target            string     `json:"target"`
-	Hostname          string     `json:"hostname"`
-	Username          string     `json:"username"`
-	OS                string     `json:"os"`
-	Arch              string     `json:"arch"`
-	CPUThreads        int        `json:"cpu_threads"`
-	RAMMB             uint64     `json:"ram_mb"`
-	UptimeSeconds     uint64     `json:"uptime_seconds"`
-	Disks             []DiskInfo `json:"disks"`
-	CPUUsagePercent   float64    `json:"cpu_usage_percent"`
-	MemoryTotalMB     uint64     `json:"memory_total_mb"`
-	MemoryAvailableMB uint64     `json:"memory_available_mb"`
-	MemoryUsedMB      uint64     `json:"memory_used_mb"`
-	MemoryUsedPercent float64    `json:"memory_used_percent"`
-	TopTasks          []TaskInfo `json:"top_tasks"`
-	TimestampUnix     int64      `json:"timestamp_unix"`
+	Agent             string      `json:"agent"`
+	Version           string      `json:"version"`
+	Target            string      `json:"target"`
+	Hostname          string      `json:"hostname"`
+	Username          string      `json:"username"`
+	OS                string      `json:"os"`
+	Arch              string      `json:"arch"`
+	CPUThreads        int         `json:"cpu_threads"`
+	RAMMB             uint64      `json:"ram_mb"`
+	UptimeSeconds     uint64      `json:"uptime_seconds"`
+	BootTimeUnix      int64       `json:"boot_time_unix"`
+	ProcessCount      int         `json:"process_count"`
+	Network           NetworkInfo `json:"network"`
+	Disks             []DiskInfo  `json:"disks"`
+	CPUUsagePercent   float64     `json:"cpu_usage_percent"`
+	MemoryTotalMB     uint64      `json:"memory_total_mb"`
+	MemoryAvailableMB uint64      `json:"memory_available_mb"`
+	MemoryUsedMB      uint64      `json:"memory_used_mb"`
+	MemoryUsedPercent float64     `json:"memory_used_percent"`
+	TopTasks          []TaskInfo  `json:"top_tasks"`
+	TimestampUnix     int64       `json:"timestamp_unix"`
 }
 
 func gb(v uint64) uint64 { return v / 1024 / 1024 / 1024 }
@@ -205,6 +223,66 @@ func collectTasks(interval time.Duration, cpuThreads int) []TaskInfo {
 	return out
 }
 
+func collectNetwork() NetworkInfo {
+	interfaces, err := net.Interfaces()
+	if err != nil {
+		return NetworkInfo{}
+	}
+
+	adapters := make([]NetworkAdapter, 0, len(interfaces))
+
+	for _, iface := range interfaces {
+		flags := []string{}
+		for _, part := range strings.Split(iface.Flags.String(), "|") {
+			part = strings.TrimSpace(part)
+			if part != "" {
+				flags = append(flags, part)
+			}
+		}
+
+		addrs, _ := iface.Addrs()
+		addresses := make([]string, 0, len(addrs))
+		for _, addr := range addrs {
+			if addr == nil {
+				continue
+			}
+			addresses = append(addresses, addr.String())
+		}
+
+		// Skip empty non-useful adapters, but keep real interfaces even if currently down.
+		if iface.Name == "" && iface.HardwareAddr.String() == "" && len(addresses) == 0 {
+			continue
+		}
+
+		adapters = append(adapters, NetworkAdapter{
+			Name:         iface.Name,
+			Index:        iface.Index,
+			MTU:          iface.MTU,
+			HardwareAddr: iface.HardwareAddr.String(),
+			Flags:        flags,
+			Addresses:    addresses,
+			IsUp:         iface.Flags&net.FlagUp != 0,
+		})
+	}
+
+	sort.Slice(adapters, func(i, j int) bool {
+		if adapters[i].IsUp == adapters[j].IsUp {
+			return adapters[i].Name < adapters[j].Name
+		}
+		return adapters[i].IsUp && !adapters[j].IsUp
+	})
+
+	return NetworkInfo{Adapters: adapters}
+}
+
+func collectProcessCount() int {
+	procs, err := process.Processes()
+	if err != nil {
+		return 0
+	}
+	return len(procs)
+}
+
 func collect() Payload {
 	hostname, _ := os.Hostname()
 
@@ -225,6 +303,7 @@ func collect() Payload {
 
 	osName := runtime.GOOS
 	uptime := uint64(0)
+	bootTimeUnix := int64(0)
 
 	if h != nil {
 		osName = fmt.Sprintf("%s %s %s", h.Platform, h.PlatformVersion, h.KernelVersion)
@@ -235,6 +314,7 @@ func collect() Payload {
 			}
 		}
 		uptime = h.Uptime
+		bootTimeUnix = int64(h.BootTime)
 	}
 
 	totalMB := uint64(0)
@@ -260,6 +340,9 @@ func collect() Payload {
 		CPUThreads:        cpuThreads,
 		RAMMB:             totalMB,
 		UptimeSeconds:     uptime,
+		BootTimeUnix:      bootTimeUnix,
+		ProcessCount:      collectProcessCount(),
+		Network:           collectNetwork(),
 		Disks:             collectDisks(),
 		CPUUsagePercent:   cpuPercent,
 		MemoryTotalMB:     totalMB,
