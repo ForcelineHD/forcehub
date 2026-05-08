@@ -5,11 +5,21 @@
 #include <thread>
 #include <cstdlib>
 #include <cstdint>
+#include <algorithm>
+#include <iomanip>
+#include <map>
+#include <chrono>
+#include <cstring>
 
 #ifdef _WIN32
-  #define NOMINMAX
+  #ifndef NOMINMAX
+    #define NOMINMAX
+  #endif
+  #define WIN32_LEAN_AND_MEAN
   #include <windows.h>
   #include <lmcons.h>
+  #include <tlhelp32.h>
+  #include <psapi.h>
 #else
   #include <unistd.h>
   #include <sys/sysinfo.h>
@@ -43,7 +53,59 @@ static std::string q(const std::string& s) {
     return "\"" + json_escape(s) + "\"";
 }
 
+static std::string num1(double value) {
+    std::ostringstream ss;
+    ss << std::fixed << std::setprecision(1) << value;
+    return ss.str();
+}
+
 #ifdef _WIN32
+
+static uint64_t filetime_to_u64(const FILETIME& ft) {
+    ULARGE_INTEGER uli{};
+    uli.LowPart = ft.dwLowDateTime;
+    uli.HighPart = ft.dwHighDateTime;
+    return uli.QuadPart;
+}
+
+struct ProcSample {
+    DWORD pid = 0;
+    std::string name;
+    uint64_t cpu_100ns = 0;
+    uint64_t memory_bytes = 0;
+};
+
+static std::string wide_to_utf8(const wchar_t* ws) {
+    if (!ws || !*ws) return "unknown";
+
+    int size_needed = WideCharToMultiByte(
+        CP_UTF8,
+        0,
+        ws,
+        -1,
+        nullptr,
+        0,
+        nullptr,
+        nullptr
+    );
+
+    if (size_needed <= 0) return "unknown";
+
+    std::string out(static_cast<size_t>(size_needed - 1), '\0');
+
+    WideCharToMultiByte(
+        CP_UTF8,
+        0,
+        ws,
+        -1,
+        out.data(),
+        size_needed,
+        nullptr,
+        nullptr
+    );
+
+    return out;
+}
 
 static std::string get_hostname() {
     char buffer[MAX_COMPUTERNAME_LENGTH + 1] = {0};
@@ -68,7 +130,7 @@ static std::string get_os_string() {
     HMODULE ntdll = GetModuleHandleA("ntdll.dll");
     if (ntdll) {
         auto rtl_get_version = reinterpret_cast<RtlGetVersionPtr>(
-            GetProcAddress(ntdll, "RtlGetVersion")
+            reinterpret_cast<void*>(GetProcAddress(ntdll, "RtlGetVersion"))
         );
 
         if (rtl_get_version && rtl_get_version(&osvi) == 0) {
@@ -90,13 +152,16 @@ static std::string get_os_string() {
     return "Windows";
 }
 
-static uint64_t get_total_ram_mb() {
+static MEMORYSTATUSEX get_memory_status() {
     MEMORYSTATUSEX mem{};
     mem.dwLength = sizeof(mem);
-    if (GlobalMemoryStatusEx(&mem)) {
-        return static_cast<uint64_t>(mem.ullTotalPhys / 1024 / 1024);
-    }
-    return 0;
+    GlobalMemoryStatusEx(&mem);
+    return mem;
+}
+
+static uint64_t get_total_ram_mb() {
+    auto mem = get_memory_status();
+    return static_cast<uint64_t>(mem.ullTotalPhys / 1024 / 1024);
 }
 
 static uint64_t get_uptime_seconds() {
@@ -123,7 +188,7 @@ static std::string get_arch() {
 
 static std::string get_disks_json() {
     char drives[512] = {0};
-    DWORD len = GetLogicalDriveStringsA(sizeof(drives), drives);
+    GetLogicalDriveStringsA(sizeof(drives), drives);
 
     std::ostringstream ss;
     ss << "[";
@@ -145,6 +210,143 @@ static std::string get_disks_json() {
     }
 
     ss << "]";
+    return ss.str();
+}
+
+static std::map<DWORD, ProcSample> sample_processes() {
+    std::map<DWORD, ProcSample> out;
+
+    HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+    if (snap == INVALID_HANDLE_VALUE) return out;
+
+    PROCESSENTRY32W pe{};
+    pe.dwSize = sizeof(pe);
+
+    if (Process32FirstW(snap, &pe)) {
+        do {
+            ProcSample ps{};
+            ps.pid = pe.th32ProcessID;
+            ps.name = wide_to_utf8(pe.szExeFile);
+
+            HANDLE h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_VM_READ, FALSE, ps.pid);
+            if (h) {
+                FILETIME createTime{}, exitTime{}, kernelTime{}, userTime{};
+                if (GetProcessTimes(h, &createTime, &exitTime, &kernelTime, &userTime)) {
+                    ps.cpu_100ns = filetime_to_u64(kernelTime) + filetime_to_u64(userTime);
+                }
+
+                PROCESS_MEMORY_COUNTERS_EX pmc{};
+                if (GetProcessMemoryInfo(h, reinterpret_cast<PROCESS_MEMORY_COUNTERS*>(&pmc), sizeof(pmc))) {
+                    ps.memory_bytes = static_cast<uint64_t>(pmc.WorkingSetSize);
+                }
+
+                CloseHandle(h);
+            }
+
+            out[ps.pid] = ps;
+        } while (Process32NextW(snap, &pe));
+    }
+
+    CloseHandle(snap);
+    return out;
+}
+
+static uint64_t system_busy_100ns() {
+    FILETIME idle{}, kernel{}, user{};
+    if (!GetSystemTimes(&idle, &kernel, &user)) return 0;
+
+    uint64_t k = filetime_to_u64(kernel);
+    uint64_t u = filetime_to_u64(user);
+    uint64_t i = filetime_to_u64(idle);
+
+    return (k + u) - i;
+}
+
+static uint64_t system_total_100ns() {
+    FILETIME idle{}, kernel{}, user{};
+    if (!GetSystemTimes(&idle, &kernel, &user)) return 0;
+
+    return filetime_to_u64(kernel) + filetime_to_u64(user);
+}
+
+static std::string get_live_metrics_json() {
+    unsigned int cpu_threads = get_cpu_threads();
+
+    auto mem = get_memory_status();
+
+    uint64_t total_before = system_total_100ns();
+    uint64_t busy_before = system_busy_100ns();
+    auto proc_before = sample_processes();
+
+    Sleep(500);
+
+    uint64_t total_after = system_total_100ns();
+    uint64_t busy_after = system_busy_100ns();
+    auto proc_after = sample_processes();
+
+    uint64_t total_delta = total_after > total_before ? total_after - total_before : 0;
+    uint64_t busy_delta = busy_after > busy_before ? busy_after - busy_before : 0;
+
+    double cpu_usage = total_delta ? (static_cast<double>(busy_delta) * 100.0 / static_cast<double>(total_delta)) : 0.0;
+
+    struct ProcLive {
+        DWORD pid;
+        std::string name;
+        double cpu_percent;
+        uint64_t memory_mb;
+    };
+
+    std::vector<ProcLive> live;
+
+    for (const auto& [pid, after] : proc_after) {
+        auto it = proc_before.find(pid);
+        if (it == proc_before.end()) continue;
+
+        uint64_t cpu_delta = after.cpu_100ns > it->second.cpu_100ns
+            ? after.cpu_100ns - it->second.cpu_100ns
+            : 0;
+
+        double proc_cpu = 0.0;
+        if (total_delta && cpu_threads) {
+            proc_cpu = (static_cast<double>(cpu_delta) * 100.0) / static_cast<double>(total_delta);
+        }
+
+        live.push_back({
+            pid,
+            after.name,
+            proc_cpu,
+            static_cast<uint64_t>(after.memory_bytes / 1024 / 1024)
+        });
+    }
+
+    std::sort(live.begin(), live.end(), [](const ProcLive& a, const ProcLive& b) {
+        if (a.cpu_percent == b.cpu_percent) return a.memory_mb > b.memory_mb;
+        return a.cpu_percent > b.cpu_percent;
+    });
+
+    std::ostringstream ss;
+    ss << "{";
+    ss << "\"cpu_usage_percent\":" << num1(cpu_usage) << ",";
+    ss << "\"memory_total_mb\":" << static_cast<uint64_t>(mem.ullTotalPhys / 1024 / 1024) << ",";
+    ss << "\"memory_available_mb\":" << static_cast<uint64_t>(mem.ullAvailPhys / 1024 / 1024) << ",";
+    ss << "\"memory_used_mb\":" << static_cast<uint64_t>((mem.ullTotalPhys - mem.ullAvailPhys) / 1024 / 1024) << ",";
+    ss << "\"memory_used_percent\":" << static_cast<unsigned int>(mem.dwMemoryLoad) << ",";
+    ss << "\"top_tasks\":[";
+
+    size_t limit = std::min<size_t>(live.size(), 10);
+    for (size_t i = 0; i < limit; ++i) {
+        if (i) ss << ",";
+        ss << "{";
+        ss << "\"pid\":" << live[i].pid << ",";
+        ss << "\"name\":" << q(live[i].name) << ",";
+        ss << "\"cpu_percent\":" << num1(live[i].cpu_percent) << ",";
+        ss << "\"memory_mb\":" << live[i].memory_mb;
+        ss << "}";
+    }
+
+    ss << "]";
+    ss << "}";
+
     return ss.str();
 }
 
@@ -221,14 +423,37 @@ static std::string get_disks_json() {
     return ss.str();
 }
 
+static std::string get_live_metrics_json() {
+    struct sysinfo info{};
+    sysinfo(&info);
+
+    uint64_t total_mb = static_cast<uint64_t>((info.totalram * info.mem_unit) / 1024 / 1024);
+    uint64_t free_mb = static_cast<uint64_t>((info.freeram * info.mem_unit) / 1024 / 1024);
+    uint64_t used_mb = total_mb > free_mb ? total_mb - free_mb : 0;
+    uint64_t used_percent = total_mb ? (used_mb * 100 / total_mb) : 0;
+
+    std::ostringstream ss;
+    ss << "{";
+    ss << "\"cpu_usage_percent\":0.0,";
+    ss << "\"memory_total_mb\":" << total_mb << ",";
+    ss << "\"memory_available_mb\":" << free_mb << ",";
+    ss << "\"memory_used_mb\":" << used_mb << ",";
+    ss << "\"memory_used_percent\":" << used_percent << ",";
+    ss << "\"top_tasks\":[]";
+    ss << "}";
+    return ss.str();
+}
+
 #endif
 
 static void print_json() {
+    std::string metrics = get_live_metrics_json();
+
     std::ostringstream ss;
 
     ss << "{";
     ss << "\"agent\":\"ForceHubAgent\",";
-    ss << "\"version\":\"0.1.0\",";
+    ss << "\"version\":\"0.2.0\",";
 #ifdef _WIN32
     ss << "\"target\":\"windows\",";
 #else
@@ -241,7 +466,20 @@ static void print_json() {
     ss << "\"cpu_threads\":" << get_cpu_threads() << ",";
     ss << "\"ram_mb\":" << get_total_ram_mb() << ",";
     ss << "\"uptime_seconds\":" << get_uptime_seconds() << ",";
-    ss << "\"disks\":" << get_disks_json();
+    ss << "\"disks\":" << get_disks_json() << ",";
+
+    // inject metrics object fields without surrounding braces
+    if (metrics.size() >= 2 && metrics.front() == '{' && metrics.back() == '}') {
+        ss << metrics.substr(1, metrics.size() - 2);
+    } else {
+        ss << "\"cpu_usage_percent\":0.0,"
+           << "\"memory_used_percent\":0,"
+           << "\"memory_used_mb\":0,"
+           << "\"memory_available_mb\":0,"
+           << "\"memory_total_mb\":0,"
+           << "\"top_tasks\":[]";
+    }
+
     ss << "}";
 
     std::cout << ss.str() << std::endl;
@@ -249,7 +487,7 @@ static void print_json() {
 
 static void print_help() {
     std::cout
-        << "ForceHubAgent 0.1.0\n"
+        << "ForceHubAgent 0.2.0\n"
         << "\n"
         << "Usage:\n"
         << "  ForceHubAgent.exe --json\n"
@@ -257,7 +495,7 @@ static void print_help() {
         << "\n"
         << "Description:\n"
         << "  Local diagnostics agent for ForceHub.\n"
-        << "  Current version only prints local system inventory as JSON.\n";
+        << "  Prints system inventory, CPU usage, memory usage, disks, and top tasks as JSON.\n";
 }
 
 int main(int argc, char* argv[]) {
