@@ -7,9 +7,11 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"runtime"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -32,9 +34,9 @@ type DiskInfo struct {
 }
 
 type TaskInfo struct {
-	PID       int32   `json:"pid"`
-	Name      string  `json:"name"`
-	CPU       float64 `json:"cpu_percent"`
+	PID      int32   `json:"pid"`
+	Name     string  `json:"name"`
+	CPU      float64 `json:"cpu_percent"`
 	MemoryMB uint64  `json:"memory_mb"`
 }
 
@@ -56,7 +58,7 @@ type Payload struct {
 	MemoryUsedMB      uint64     `json:"memory_used_mb"`
 	MemoryUsedPercent float64    `json:"memory_used_percent"`
 	TopTasks          []TaskInfo `json:"top_tasks"`
-	TimestampUnix      int64      `json:"timestamp_unix"`
+	TimestampUnix     int64      `json:"timestamp_unix"`
 }
 
 func gb(v uint64) uint64 { return v / 1024 / 1024 / 1024 }
@@ -182,9 +184,9 @@ func collectTasks(interval time.Duration, cpuThreads int) []TaskInfo {
 		}
 
 		out = append(out, TaskInfo{
-			PID:       p.Pid,
-			Name:      name,
-			CPU:       round1(cpuPercent),
+			PID:      p.Pid,
+			Name:     name,
+			CPU:      round1(cpuPercent),
 			MemoryMB: mb(memBytes),
 		})
 	}
@@ -265,7 +267,7 @@ func collect() Payload {
 		MemoryUsedMB:      usedMB,
 		MemoryUsedPercent: usedPercent,
 		TopTasks:          collectTasks(1*time.Second, cpuThreads),
-		TimestampUnix:      time.Now().Unix(),
+		TimestampUnix:     time.Now().Unix(),
 	}
 }
 
@@ -302,7 +304,47 @@ func readToken(tokenFile string) (string, error) {
 	return token, nil
 }
 
+func validatePostServerURL(serverURL string) error {
+	parsed, err := url.Parse(serverURL)
+	if err != nil {
+		return fmt.Errorf("invalid server URL: %w", err)
+	}
+
+	if parsed.Scheme != "http" {
+		return fmt.Errorf("invalid server URL: scheme must be http")
+	}
+
+	host := parsed.Hostname()
+	if host != "127.0.0.1" && host != "localhost" {
+		return fmt.Errorf("invalid server URL: host must be 127.0.0.1 or localhost")
+	}
+
+	port := parsed.Port()
+	if port == "" {
+		return fmt.Errorf("invalid server URL: explicit port is required")
+	}
+
+	portNumber, err := strconv.Atoi(port)
+	if err != nil || portNumber < 1 || portNumber > 65535 {
+		return fmt.Errorf("invalid server URL: port must be between 1 and 65535")
+	}
+
+	if parsed.Path == "" || !strings.HasPrefix(parsed.Path, "/") {
+		return fmt.Errorf("invalid server URL: path is required")
+	}
+
+	if parsed.User != nil || parsed.Fragment != "" {
+		return fmt.Errorf("invalid server URL: userinfo and fragments are not allowed")
+	}
+
+	return nil
+}
+
 func postPayload(payload Payload, serverURL string, tokenFile string) error {
+	if err := validatePostServerURL(serverURL); err != nil {
+		return err
+	}
+
 	token, err := readToken(tokenFile)
 	if err != nil {
 		return err

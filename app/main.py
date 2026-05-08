@@ -617,7 +617,7 @@ def rate_limit_result(request: Request) -> tuple[bool, int]:
 @app.middleware("http")
 async def forcehub_basic_auth(request: Request, call_next):
     # FORCEHUB_AGENT_AUTH_BYPASS
-    if request.url.path.startswith("/api/agents") or request.url.path == "/agents":
+    if request.url.path.startswith("/api/agents"):
         return await call_next(request)
 
     if request.url.path.startswith("/status"):
@@ -637,7 +637,7 @@ async def forcehub_basic_auth(request: Request, call_next):
 @app.middleware("http")
 async def forcehub_rate_limit(request: Request, call_next):
     # FORCEHUB_AGENT_AUTH_BYPASS
-    if request.url.path.startswith("/api/agents") or request.url.path == "/agents":
+    if request.url.path.startswith("/api/agents"):
         return await call_next(request)
 
     limited, retry_after = rate_limit_result(request)
@@ -2039,13 +2039,32 @@ if __name__ == "__main__":
 
 import os as _fh_os
 import json as _fh_json
+import math as _fh_math
+import re as _fh_re
+import secrets as _fh_secrets
+import tempfile as _fh_tempfile
 import time as _fh_time
+from contextlib import contextmanager as _fh_contextmanager
 from pathlib import Path as _fh_Path
+from threading import RLock as _fh_RLock
 from typing import Any as _fh_Any, Dict as _fh_Dict
 
 from fastapi import Header as _fh_Header, HTTPException as _fh_HTTPException, Request as _fh_Request
 
 _FH_AGENT_DATA_FILE = _fh_Path(__file__).resolve().parent.parent / "data" / "agents.json"
+_FH_AGENT_STORE_LOCK = _fh_RLock()
+_FH_AGENT_HOSTNAME_PATTERN = _fh_re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+_FH_AGENT_MAX_PAYLOAD_BYTES = 65536
+_FH_AGENT_MAX_COLLECTION_ITEMS = 128
+_FH_AGENT_MAX_DICT_KEYS = 64
+_FH_AGENT_MAX_KEY_CHARS = 64
+_FH_AGENT_MAX_STRING_CHARS = 4096
+_FH_AGENT_MAX_JSON_DEPTH = 6
+
+try:
+    import fcntl as _fh_fcntl
+except ImportError:
+    _fh_fcntl = None
 
 
 def _fh_agent_expected_token() -> str:
@@ -2057,11 +2076,114 @@ def _fh_require_agent_token(x_forcehub_agent_token: str | None) -> None:
     if not expected:
         raise _fh_HTTPException(status_code=503, detail="ForceHub agent token is not configured")
 
-    if not x_forcehub_agent_token or x_forcehub_agent_token.strip() != expected:
+    supplied = (x_forcehub_agent_token or "").strip()
+    if not supplied or not _fh_secrets.compare_digest(supplied, expected):
         raise _fh_HTTPException(status_code=401, detail="Invalid ForceHub agent token")
 
 
-def _fh_load_agents() -> _fh_Dict[str, _fh_Any]:
+def _fh_validate_agent_json_value(value: _fh_Any, depth: int = 0) -> None:
+    if depth > _FH_AGENT_MAX_JSON_DEPTH:
+        raise _fh_HTTPException(status_code=422, detail="ForceHub agent payload is too deeply nested")
+
+    if value is None or isinstance(value, bool):
+        return
+
+    if isinstance(value, str):
+        if len(value) > _FH_AGENT_MAX_STRING_CHARS:
+            raise _fh_HTTPException(status_code=422, detail="ForceHub agent payload string is too long")
+        if CONTROL_CHAR_PATTERN.search(value):
+            raise _fh_HTTPException(status_code=422, detail="ForceHub agent payload contains control characters")
+        return
+
+    if isinstance(value, int):
+        if abs(value) > 10**15:
+            raise _fh_HTTPException(status_code=422, detail="ForceHub agent payload integer is too large")
+        return
+
+    if isinstance(value, float):
+        if not _fh_math.isfinite(value):
+            raise _fh_HTTPException(status_code=422, detail="ForceHub agent payload contains invalid numbers")
+        return
+
+    if isinstance(value, list):
+        if len(value) > _FH_AGENT_MAX_COLLECTION_ITEMS:
+            raise _fh_HTTPException(status_code=422, detail="ForceHub agent payload list is too long")
+        for item in value:
+            _fh_validate_agent_json_value(item, depth + 1)
+        return
+
+    if isinstance(value, dict):
+        if len(value) > _FH_AGENT_MAX_DICT_KEYS:
+            raise _fh_HTTPException(status_code=422, detail="ForceHub agent payload object has too many keys")
+        for key, item in value.items():
+            if not isinstance(key, str) or not key or len(key) > _FH_AGENT_MAX_KEY_CHARS:
+                raise _fh_HTTPException(status_code=422, detail="ForceHub agent payload has an invalid key")
+            if CONTROL_CHAR_PATTERN.search(key):
+                raise _fh_HTTPException(status_code=422, detail="ForceHub agent payload key contains control characters")
+            _fh_validate_agent_json_value(item, depth + 1)
+        return
+
+    raise _fh_HTTPException(status_code=422, detail="ForceHub agent payload contains an invalid value")
+
+
+def _fh_validated_agent_hostname(payload: _fh_Dict[str, _fh_Any]) -> str:
+    raw_hostname = payload.get("hostname")
+    if raw_hostname is None or raw_hostname == "":
+        return "unknown"
+    if not isinstance(raw_hostname, str):
+        raise _fh_HTTPException(status_code=422, detail="ForceHub agent hostname must be a string")
+
+    hostname = raw_hostname.strip()
+    if not hostname:
+        return "unknown"
+    if not _FH_AGENT_HOSTNAME_PATTERN.fullmatch(hostname):
+        raise _fh_HTTPException(status_code=422, detail="ForceHub agent hostname is invalid")
+    return hostname
+
+
+def _fh_validate_agent_payload(payload: _fh_Dict[str, _fh_Any]) -> str:
+    if not isinstance(payload, dict):
+        raise _fh_HTTPException(status_code=422, detail="ForceHub agent payload must be an object")
+
+    _fh_validate_agent_json_value(payload)
+    try:
+        payload_size = len(
+            _fh_json.dumps(payload, ensure_ascii=False, separators=(",", ":"), allow_nan=False).encode("utf-8")
+        )
+    except (TypeError, ValueError):
+        raise _fh_HTTPException(status_code=422, detail="ForceHub agent payload must be valid JSON")
+
+    if payload_size > _FH_AGENT_MAX_PAYLOAD_BYTES:
+        raise _fh_HTTPException(status_code=413, detail="ForceHub agent payload is too large")
+
+    return _fh_validated_agent_hostname(payload)
+
+
+def _fh_lock_agents_file(lock_file) -> None:
+    if _fh_fcntl is not None:
+        _fh_fcntl.flock(lock_file.fileno(), _fh_fcntl.LOCK_EX)
+
+
+def _fh_unlock_agents_file(lock_file) -> None:
+    if _fh_fcntl is not None:
+        _fh_fcntl.flock(lock_file.fileno(), _fh_fcntl.LOCK_UN)
+
+
+@_fh_contextmanager
+def _fh_agents_store_guard():
+    _FH_AGENT_DATA_FILE.parent.mkdir(parents=True, exist_ok=True)
+    lock_path = _FH_AGENT_DATA_FILE.with_name(f"{_FH_AGENT_DATA_FILE.name}.lock")
+
+    with _FH_AGENT_STORE_LOCK:
+        with lock_path.open("a+b") as lock_file:
+            _fh_lock_agents_file(lock_file)
+            try:
+                yield
+            finally:
+                _fh_unlock_agents_file(lock_file)
+
+
+def _fh_load_agents_unlocked() -> _fh_Dict[str, _fh_Any]:
     _FH_AGENT_DATA_FILE.parent.mkdir(parents=True, exist_ok=True)
 
     if not _FH_AGENT_DATA_FILE.exists():
@@ -2075,15 +2197,59 @@ def _fh_load_agents() -> _fh_Dict[str, _fh_Any]:
         return {}
 
 
-def _fh_save_agents(data: _fh_Dict[str, _fh_Any]) -> None:
+def _fh_load_agents() -> _fh_Dict[str, _fh_Any]:
+    with _fh_agents_store_guard():
+        return _fh_load_agents_unlocked()
+
+
+def _fh_fsync_parent_dir(path: _fh_Path) -> None:
+    if not hasattr(_fh_os, "O_RDONLY"):
+        return
+
+    try:
+        dir_fd = _fh_os.open(str(path), _fh_os.O_RDONLY)
+    except OSError:
+        return
+
+    try:
+        _fh_os.fsync(dir_fd)
+    except OSError:
+        pass
+    finally:
+        _fh_os.close(dir_fd)
+
+
+def _fh_save_agents_unlocked(data: _fh_Dict[str, _fh_Any]) -> None:
     _FH_AGENT_DATA_FILE.parent.mkdir(parents=True, exist_ok=True)
 
-    tmp = _FH_AGENT_DATA_FILE.with_suffix(".json.tmp")
-    with tmp.open("w", encoding="utf-8") as f:
-        _fh_json.dump(data, f, indent=2, sort_keys=True)
-        f.write("\n")
+    fd, tmp_name = _fh_tempfile.mkstemp(
+        prefix=f".{_FH_AGENT_DATA_FILE.name}.",
+        suffix=".tmp",
+        dir=str(_FH_AGENT_DATA_FILE.parent),
+        text=True,
+    )
+    tmp_path = _fh_Path(tmp_name)
 
-    tmp.replace(_FH_AGENT_DATA_FILE)
+    try:
+        with _fh_os.fdopen(fd, "w", encoding="utf-8") as f:
+            _fh_json.dump(data, f, indent=2, sort_keys=True)
+            f.write("\n")
+            f.flush()
+            _fh_os.fsync(f.fileno())
+
+        _fh_os.replace(str(tmp_path), str(_FH_AGENT_DATA_FILE))
+        _fh_fsync_parent_dir(_FH_AGENT_DATA_FILE.parent)
+    except Exception:
+        try:
+            tmp_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise
+
+
+def _fh_save_agents(data: _fh_Dict[str, _fh_Any]) -> None:
+    with _fh_agents_store_guard():
+        _fh_save_agents_unlocked(data)
 
 
 @app.post("/api/agents/checkin")
@@ -2094,21 +2260,20 @@ async def forcehub_agent_checkin(
 ):
     _fh_require_agent_token(x_forcehub_agent_token)
 
-    hostname = str(payload.get("hostname") or "unknown").strip()[:128]
-    if not hostname:
-        hostname = "unknown"
+    hostname = _fh_validate_agent_payload(payload)
 
     now = int(_fh_time.time())
     client_host = request.client.host if request.client else "unknown"
 
-    agents = _fh_load_agents()
-    agents[hostname] = {
-        "hostname": hostname,
-        "last_checkin_unix": now,
-        "client_host": client_host,
-        "payload": payload,
-    }
-    _fh_save_agents(agents)
+    with _fh_agents_store_guard():
+        agents = _fh_load_agents_unlocked()
+        agents[hostname] = {
+            "hostname": hostname,
+            "last_checkin_unix": now,
+            "client_host": client_host,
+            "payload": payload,
+        }
+        _fh_save_agents_unlocked(agents)
 
     return {
         "ok": True,
@@ -2289,5 +2454,4 @@ async def forcehub_agents_dashboard():
     return _fh_HTMLResponse(_fh_agent_dashboard_html())
 
 # === FORCEHUB_AGENTS_DASHBOARD_END ===
-
 
