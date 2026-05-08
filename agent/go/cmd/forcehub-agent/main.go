@@ -1,12 +1,16 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
+	"net/http"
 	"os"
 	"runtime"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/shirou/gopsutil/v4/cpu"
@@ -18,7 +22,7 @@ import (
 
 const (
 	agentName    = "ForceHubAgent-Go"
-	agentVersion = "0.2.0-go"
+	agentVersion = "0.3.0-go"
 )
 
 type DiskInfo struct {
@@ -85,7 +89,6 @@ func collectDisks() []DiskInfo {
 		totalGB := gb(u.Total)
 		freeGB := gb(u.Free)
 
-		// Filter tiny pseudo mounts, especially Linux snap mounts.
 		if totalGB == 0 && freeGB == 0 {
 			continue
 		}
@@ -277,6 +280,64 @@ func printJSON(payload Payload, pretty bool) error {
 	return enc.Encode(payload)
 }
 
+func readToken(tokenFile string) (string, error) {
+	if envToken := strings.TrimSpace(os.Getenv("FORCEHUB_AGENT_TOKEN")); envToken != "" {
+		return envToken, nil
+	}
+
+	if strings.TrimSpace(tokenFile) == "" {
+		return "", fmt.Errorf("missing token: use --token-file or FORCEHUB_AGENT_TOKEN")
+	}
+
+	raw, err := os.ReadFile(tokenFile)
+	if err != nil {
+		return "", err
+	}
+
+	token := strings.TrimSpace(string(raw))
+	if token == "" {
+		return "", fmt.Errorf("empty token file: %s", tokenFile)
+	}
+
+	return token, nil
+}
+
+func postPayload(payload Payload, serverURL string, tokenFile string) error {
+	token, err := readToken(tokenFile)
+	if err != nil {
+		return err
+	}
+
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return err
+	}
+
+	req, err := http.NewRequest(http.MethodPost, serverURL, bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-ForceHub-Agent-Token", token)
+
+	client := &http.Client{Timeout: 15 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	respBody, _ := io.ReadAll(resp.Body)
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return fmt.Errorf("post failed: HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(respBody)))
+	}
+
+	fmt.Println(strings.TrimSpace(string(respBody)))
+	return nil
+}
+
 func usage() {
 	fmt.Fprintf(os.Stderr, `%s %s
 
@@ -284,7 +345,8 @@ Usage:
   ForceHubAgent-Go.exe
   ForceHubAgent-Go.exe --once
   ForceHubAgent-Go.exe --watch --interval 3
-  ForceHubAgent-Go.exe --pretty
+  ForceHubAgent-Go.exe --post --server http://127.0.0.1:18001/api/agents/checkin --token-file D:\Scripts\ForceHubAgent\agent_token.txt
+  ForceHubAgent-Go.exe --watch --post --interval 3 --server http://127.0.0.1:18001/api/agents/checkin --token-file D:\Scripts\ForceHubAgent\agent_token.txt
 
 Options:
 `, agentName, agentVersion)
@@ -294,7 +356,10 @@ Options:
 func main() {
 	once := flag.Bool("once", false, "collect once and exit")
 	watch := flag.Bool("watch", false, "collect forever")
+	post := flag.Bool("post", false, "post payload to ForceHub instead of printing JSON")
 	interval := flag.Int("interval", 3, "watch interval in seconds")
+	server := flag.String("server", "http://127.0.0.1:18001/api/agents/checkin", "ForceHub check-in URL")
+	tokenFile := flag.String("token-file", "", "file containing ForceHub agent token")
 	pretty := flag.Bool("pretty", false, "pretty-print JSON")
 	version := flag.Bool("version", false, "print version and exit")
 
@@ -310,19 +375,41 @@ func main() {
 		*interval = 1
 	}
 
-	// Backward compatible default: collect once and exit.
-	if *once || !*watch {
-		if err := printJSON(collect(), *pretty); err != nil {
+	runOnce := func() {
+		payload := collect()
+
+		if *post {
+			if err := postPayload(payload, *server, *tokenFile); err != nil {
+				fmt.Fprintln(os.Stderr, err)
+				os.Exit(1)
+			}
+			return
+		}
+
+		if err := printJSON(payload, *pretty); err != nil {
 			fmt.Fprintln(os.Stderr, err)
 			os.Exit(1)
 		}
+	}
+
+	if *once || !*watch {
+		runOnce()
 		return
 	}
 
 	for {
-		if err := printJSON(collect(), *pretty); err != nil {
-			fmt.Fprintln(os.Stderr, err)
+		payload := collect()
+
+		if *post {
+			if err := postPayload(payload, *server, *tokenFile); err != nil {
+				fmt.Fprintln(os.Stderr, err)
+			}
+		} else {
+			if err := printJSON(payload, *pretty); err != nil {
+				fmt.Fprintln(os.Stderr, err)
+			}
 		}
+
 		time.Sleep(time.Duration(*interval) * time.Second)
 	}
 }
