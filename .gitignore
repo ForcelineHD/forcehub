@@ -25,3 +25,7 @@ app/main.py.bak.agent_api_*
 # ForceHub runtime data / secrets
 data/
 logs/
+
+# Rust build output
+target/
+**/target/
