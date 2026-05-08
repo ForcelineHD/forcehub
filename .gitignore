@@ -16,3 +16,5 @@ data/project_settings.json
 logs/
 *.pid
 *.log
+build/
+*.exe
