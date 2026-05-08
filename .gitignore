@@ -13,3 +13,6 @@ __pycache__/
 data/chats.json
 data/project_cache.json
 data/project_settings.json
+logs/
+*.pid
+*.log
