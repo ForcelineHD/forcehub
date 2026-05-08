@@ -29,12 +29,20 @@ fi
 
 export FORCEHUB_AGENT_TOKEN="$(cat "$TOKEN_FILE")"
 
-# FORCEHUB_AUTH_DISABLED_LOCAL
-export FORCEHUB_AUTH_DISABLED="1"
+# FORCEHUB_AUTH_DEFAULTS
+# Load local environment if present, then preserve caller-provided values.
+# Authentication is enabled by default; set FORCEHUB_AUTH_DISABLED=1 only for an intentionally unauthenticated local instance.
+if [ -f "$PROJECT_DIR/.env" ]; then
+  set -a
+  # shellcheck disable=SC1091
+  source "$PROJECT_DIR/.env"
+  set +a
+fi
 
-# FORCEHUB_WEB_AUTH_LOCAL
-export FORCEHUB_USERNAME="admin"
-export FORCEHUB_PASSWORD="forcehub"
+export FORCEHUB_AUTH_DISABLED="${FORCEHUB_AUTH_DISABLED:-0}"
+export FORCEHUB_USERNAME="${FORCEHUB_USERNAME:-admin}"
+export FORCEHUB_PASSWORD="${FORCEHUB_PASSWORD:-forcehub}"
+
 
 http_code() {
   curl -s -o /dev/null -w "%{http_code}" "http://$HOST:$PORT/" || true
