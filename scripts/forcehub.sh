@@ -29,6 +29,13 @@ fi
 
 export FORCEHUB_AGENT_TOKEN="$(cat "$TOKEN_FILE")"
 
+# FORCEHUB_AUTH_DISABLED_LOCAL
+export FORCEHUB_AUTH_DISABLED="1"
+
+# FORCEHUB_WEB_AUTH_LOCAL
+export FORCEHUB_USERNAME="admin"
+export FORCEHUB_PASSWORD="forcehub"
+
 http_code() {
   curl -s -o /dev/null -w "%{http_code}" "http://$HOST:$PORT/" || true
 }

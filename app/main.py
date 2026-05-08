@@ -617,7 +617,7 @@ def rate_limit_result(request: Request) -> tuple[bool, int]:
 @app.middleware("http")
 async def forcehub_basic_auth(request: Request, call_next):
     # FORCEHUB_AGENT_AUTH_BYPASS
-    if request.url.path.startswith("/api/agents"):
+    if request.url.path.startswith("/api/agents") or request.url.path == "/agents":
         return await call_next(request)
 
     if request.url.path.startswith("/status"):
@@ -637,7 +637,7 @@ async def forcehub_basic_auth(request: Request, call_next):
 @app.middleware("http")
 async def forcehub_rate_limit(request: Request, call_next):
     # FORCEHUB_AGENT_AUTH_BYPASS
-    if request.url.path.startswith("/api/agents"):
+    if request.url.path.startswith("/api/agents") or request.url.path == "/agents":
         return await call_next(request)
 
     limited, retry_after = rate_limit_result(request)
@@ -2152,6 +2152,7 @@ async def forcehub_agent_get(
 # === FORCEHUB_AGENT_API_END ===
 
 
+
 # === FORCEHUB_AGENTS_DASHBOARD_BEGIN ===
 
 from fastapi.responses import HTMLResponse as _fh_HTMLResponse
@@ -2162,24 +2163,32 @@ import datetime as _fh_datetime
 def _fh_agent_dashboard_html() -> str:
     agents = _fh_load_agents()
     rows = []
-
     now = int(_fh_time.time())
 
     for item in sorted(agents.values(), key=lambda x: x.get("hostname", "")):
         payload = item.get("payload") or {}
+
         hostname = str(item.get("hostname") or payload.get("hostname") or "unknown")
         os_name = str(payload.get("os") or "unknown")
-        target = str(payload.get("target") or "unknown")
-        arch = str(payload.get("arch") or "unknown")
+        version = str(payload.get("version") or "unknown")
         cpu_threads = str(payload.get("cpu_threads") or "unknown")
-        ram_mb = payload.get("ram_mb") or 0
-        ram_gb = round(int(ram_mb) / 1024, 1) if str(ram_mb).isdigit() else "unknown"
+
+        cpu_usage = payload.get("cpu_usage_percent", "N/A")
+        mem_used_percent = payload.get("memory_used_percent", "N/A")
+        mem_used_mb = payload.get("memory_used_mb", 0)
+        mem_total_mb = payload.get("memory_total_mb") or payload.get("ram_mb") or 0
+
+        try:
+            mem_text = f"{round(int(mem_used_mb) / 1024, 1)} / {round(int(mem_total_mb) / 1024, 1)} GB ({mem_used_percent}%)"
+        except Exception:
+            mem_text = "N/A"
+
         last_unix = int(item.get("last_checkin_unix") or 0)
         age = max(0, now - last_unix) if last_unix else 0
 
-        if age < 120:
+        if age < 30:
             status = "Online"
-        elif age < 3600:
+        elif age < 180:
             status = "Recent"
         else:
             status = "Stale"
@@ -2194,26 +2203,33 @@ def _fh_agent_dashboard_html() -> str:
             f"{d.get('mount', '?')} {d.get('free_gb', '?')}GB free / {d.get('total_gb', '?')}GB"
             for d in disks
             if isinstance(d, dict)
-        ) or "unknown"
+        ) or "N/A"
+
+        tasks = payload.get("top_tasks") or []
+        task_lines = []
+        for t in tasks[:8]:
+            if not isinstance(t, dict):
+                continue
+            task_lines.append(
+                f"{t.get('name','?')} | CPU {t.get('cpu_percent','?')}% | RAM {t.get('memory_mb','?')}MB"
+            )
+        task_text = "<br>".join(_fh_html.escape(x) for x in task_lines) or "N/A"
 
         rows.append(f"""
         <tr>
-          <td><strong>{_fh_html.escape(hostname)}</strong></td>
-          <td>{_fh_html.escape(status)}</td>
+          <td><strong>{_fh_html.escape(hostname)}</strong><br><span class="muted">v{_fh_html.escape(version)}</span></td>
+          <td><span class="status {status.lower()}">{_fh_html.escape(status)}</span></td>
           <td>{_fh_html.escape(os_name)}</td>
-          <td>{_fh_html.escape(target)} / {_fh_html.escape(arch)}</td>
-          <td>{_fh_html.escape(str(ram_gb))} GB</td>
+          <td><strong>{_fh_html.escape(str(cpu_usage))}%</strong></td>
+          <td><strong>{_fh_html.escape(mem_text)}</strong></td>
           <td>{_fh_html.escape(cpu_threads)}</td>
           <td>{_fh_html.escape(disk_text)}</td>
+          <td class="tasks">{task_text}</td>
           <td>{_fh_html.escape(last_seen)}</td>
         </tr>
         """)
 
-    body = "\n".join(rows) if rows else """
-        <tr>
-          <td colspan="8" class="empty">No agents checked in yet.</td>
-        </tr>
-    """
+    body = "\n".join(rows) if rows else '<tr><td colspan="9" class="empty">No agents checked in yet.</td></tr>'
 
     return f"""<!doctype html>
 <html>
@@ -2221,78 +2237,30 @@ def _fh_agent_dashboard_html() -> str:
   <meta charset="utf-8">
   <title>ForceHub Agents</title>
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta http-equiv="refresh" content="15">
+  <meta http-equiv="refresh" content="5">
   <style>
-    body {{
-      margin: 0;
-      font-family: Arial, sans-serif;
-      background: #0b1020;
-      color: #e5e7eb;
-    }}
-    .wrap {{
-      max-width: 1200px;
-      margin: 40px auto;
-      padding: 0 20px;
-    }}
-    h1 {{
-      margin-bottom: 6px;
-      font-size: 28px;
-    }}
-    .sub {{
-      color: #9ca3af;
-      margin-bottom: 24px;
-    }}
-    .card {{
-      background: #111827;
-      border: 1px solid #1f2937;
-      border-radius: 14px;
-      overflow: hidden;
-      box-shadow: 0 20px 40px rgba(0,0,0,.25);
-    }}
-    table {{
-      width: 100%;
-      border-collapse: collapse;
-    }}
-    th, td {{
-      padding: 14px 16px;
-      text-align: left;
-      border-bottom: 1px solid #1f2937;
-      vertical-align: top;
-      font-size: 14px;
-    }}
-    th {{
-      background: #020617;
-      color: #cbd5e1;
-      font-size: 12px;
-      text-transform: uppercase;
-      letter-spacing: .06em;
-    }}
-    tr:hover td {{
-      background: #0f172a;
-    }}
-    .empty {{
-      color: #9ca3af;
-      text-align: center;
-      padding: 30px;
-    }}
-    .actions {{
-      margin-top: 18px;
-      color: #9ca3af;
-      font-size: 13px;
-    }}
-    code {{
-      background: #020617;
-      padding: 3px 6px;
-      border-radius: 6px;
-      color: #93c5fd;
-    }}
+    body {{ margin:0; font-family:Arial,sans-serif; background:#0b1020; color:#e5e7eb; }}
+    .wrap {{ max-width:1600px; margin:32px auto; padding:0 20px; }}
+    h1 {{ margin-bottom:6px; font-size:28px; }}
+    .sub,.muted {{ color:#9ca3af; }}
+    .sub {{ margin-bottom:24px; }}
+    .card {{ background:#111827; border:1px solid #1f2937; border-radius:14px; overflow:hidden; }}
+    table {{ width:100%; border-collapse:collapse; }}
+    th,td {{ padding:13px 14px; text-align:left; border-bottom:1px solid #1f2937; vertical-align:top; font-size:13px; line-height:1.45; }}
+    th {{ background:#020617; color:#cbd5e1; font-size:11px; text-transform:uppercase; letter-spacing:.06em; }}
+    tr:hover td {{ background:#0f172a; }}
+    .tasks {{ min-width:360px; font-family:Consolas,monospace; font-size:12px; }}
+    .empty {{ color:#9ca3af; text-align:center; padding:30px; }}
+    .status {{ display:inline-block; padding:3px 8px; border-radius:999px; font-size:12px; font-weight:bold; }}
+    .online {{ background:#064e3b; color:#a7f3d0; }}
+    .recent {{ background:#78350f; color:#fde68a; }}
+    .stale {{ background:#7f1d1d; color:#fecaca; }}
   </style>
 </head>
 <body>
   <div class="wrap">
     <h1>ForceHub Agents</h1>
-    <div class="sub">Endpoint inventory from ForceHubAgent.exe. Auto-refreshes every 15 seconds.</div>
-
+    <div class="sub">Live CPU, memory, disk, and top task snapshots. Auto-refreshes every 5 seconds.</div>
     <div class="card">
       <table>
         <thead>
@@ -2300,22 +2268,16 @@ def _fh_agent_dashboard_html() -> str:
             <th>Hostname</th>
             <th>Status</th>
             <th>OS</th>
-            <th>Target</th>
-            <th>RAM</th>
+            <th>CPU Usage</th>
+            <th>Memory</th>
             <th>CPU Threads</th>
             <th>Disks</th>
+            <th>Top Tasks</th>
             <th>Last Check-in</th>
           </tr>
         </thead>
-        <tbody>
-          {body}
-        </tbody>
+        <tbody>{body}</tbody>
       </table>
-    </div>
-
-    <div class="actions">
-      Agent check-in command from Windows:
-      <code>ForceHubAgent.exe --json | ssh ubuntu-vm "./scripts/forcehub_agent_post.sh"</code>
     </div>
   </div>
 </body>
@@ -2327,4 +2289,5 @@ async def forcehub_agents_dashboard():
     return _fh_HTMLResponse(_fh_agent_dashboard_html())
 
 # === FORCEHUB_AGENTS_DASHBOARD_END ===
+
 
