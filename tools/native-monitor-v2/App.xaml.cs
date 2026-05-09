@@ -6,7 +6,10 @@ namespace ForceHubNativeMonitorV2;
 
 public partial class App : Application
 {
-    private static readonly string LogPath = @"D:\Scripts\ForceHubAgent\ForceHubNativeMonitorV2\startup.log";
+    private static readonly string LogPath = Path.Combine(
+        Environment.GetEnvironmentVariable("FORCEHUB_NATIVE_MONITOR_LOG_DIR")
+            ?? Path.Combine(AppContext.BaseDirectory, "logs"),
+        "startup.log");
 
     protected override void OnStartup(StartupEventArgs e)
     {
@@ -14,6 +17,10 @@ public partial class App : Application
 
         try
         {
+            var logDir = Path.GetDirectoryName(LogPath);
+            if (!string.IsNullOrWhiteSpace(logDir))
+                Directory.CreateDirectory(logDir);
+
             File.AppendAllText(LogPath, $"{DateTime.Now:yyyy-MM-dd HH:mm:ss} App.OnStartup entered\n");
 
             ShutdownMode = ShutdownMode.OnMainWindowClose;

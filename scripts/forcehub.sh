@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-PROJECT_DIR="/home/flozi/projects/forcehub"
-VENV="$PROJECT_DIR/.venv"
-HOST="127.0.0.1"
-PORT="8001"
-LOG_DIR="$PROJECT_DIR/logs"
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_DIR="${FORCEHUB_PROJECT_DIR:-$(cd "$SCRIPT_DIR/.." && pwd)}"
+VENV="${FORCEHUB_VENV:-$PROJECT_DIR/.venv}"
+HOST="${FORCEHUB_BIND_HOST:-127.0.0.1}"
+PORT="${FORCEHUB_BIND_PORT:-8001}"
+LOG_DIR="${FORCEHUB_LOG_DIR:-$PROJECT_DIR/logs}"
 PID_FILE="$LOG_DIR/forcehub.pid"
 LOG_FILE="$LOG_DIR/forcehub.log"
 
@@ -19,8 +20,8 @@ fi
 source "$VENV/bin/activate"
 mkdir -p "$LOG_DIR"
 
-TOKEN_FILE="$PROJECT_DIR/data/agent_token.txt"
-mkdir -p "$PROJECT_DIR/data"
+TOKEN_FILE="${FORCEHUB_AGENT_TOKEN_FILE:-$PROJECT_DIR/runtime/agent_token.txt}"
+mkdir -p "$(dirname "$TOKEN_FILE")"
 
 if [ ! -f "$TOKEN_FILE" ]; then
   openssl rand -hex 32 > "$TOKEN_FILE"
@@ -41,7 +42,7 @@ fi
 
 export FORCEHUB_AUTH_DISABLED="${FORCEHUB_AUTH_DISABLED:-0}"
 export FORCEHUB_USERNAME="${FORCEHUB_USERNAME:-admin}"
-export FORCEHUB_PASSWORD="${FORCEHUB_PASSWORD:-forcehub}"
+export FORCEHUB_PASSWORD="${FORCEHUB_PASSWORD:-change-me-local-only}"
 
 
 http_code() {

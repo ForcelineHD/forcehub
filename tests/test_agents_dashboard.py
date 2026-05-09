@@ -41,7 +41,7 @@ def test_agents_dashboard_renders(monkeypatch, tmp_path):
                 "ram_mb": 16065,
                 "cpu_threads": 12,
                 "disks": [
-                    {"mount": "C:\\", "total_gb": 231, "free_gb": 116}
+                    {"mount": "SYSTEM_DRIVE", "total_gb": 231, "free_gb": 116}
                 ],
             },
         }
@@ -52,7 +52,7 @@ def test_agents_dashboard_renders(monkeypatch, tmp_path):
     assert "ForceHub Agents" in html
     assert "TEST-PC" in html
     assert "Windows 11 build 26200" in html
-    assert "C:\\" in html
+    assert "SYSTEM_DRIVE" in html
 
 
 def test_agents_dashboard_requires_basic_auth_when_enabled(monkeypatch, tmp_path):
@@ -61,7 +61,7 @@ def test_agents_dashboard_requires_basic_auth_when_enabled(monkeypatch, tmp_path
         {
             "FORCEHUB_AGENT_TOKEN": "test-token",
             "FORCEHUB_USERNAME": "admin",
-            "FORCEHUB_PASSWORD": "secret",
+            "FORCEHUB_PASSWORD": "test-passphrase",
         },
     )
     main._FH_AGENT_DATA_FILE = tmp_path / "agents.json"
@@ -73,6 +73,6 @@ def test_agents_dashboard_requires_basic_auth_when_enabled(monkeypatch, tmp_path
     unauthenticated = client.get("/agents")
     assert unauthenticated.status_code == 401
 
-    authenticated = client.get("/agents", headers=basic_auth("admin", "secret"))
+    authenticated = client.get("/agents", headers=basic_auth("admin", "test-passphrase"))
     assert authenticated.status_code == 200
     assert "ForceHub Agents" in authenticated.text

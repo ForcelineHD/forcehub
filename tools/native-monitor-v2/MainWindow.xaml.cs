@@ -20,9 +20,13 @@ namespace ForceHubNativeMonitorV2;
 
 public partial class MainWindow : Window
 {
-    private const string BaseDir = @"D:\Scripts\ForceHubAgent";
-    private const string ApiUrl = "http://127.0.0.1:18001/api/agents";
-    private const string TokenFile = @"D:\Scripts\ForceHubAgent\agent_token.txt";
+    private static readonly string BaseDir =
+        Environment.GetEnvironmentVariable("FORCEHUB_AGENT_HOME") ?? AppContext.BaseDirectory;
+    private static readonly string ApiUrl =
+        Environment.GetEnvironmentVariable("FORCEHUB_AGENTS_URL") ?? "http://127.0.0.1:18001/api/agents";
+    private static readonly string TokenFile =
+        Environment.GetEnvironmentVariable("FORCEHUB_AGENT_TOKEN_FILE") ?? Path.Combine(BaseDir, "runtime", "agent_token.txt");
+    private static readonly string[] DefaultFocusAdapterKeywords = new[] { "Ethernet", "Wi-Fi", "Loopback" };
 
     private readonly HttpClient _http = new() { Timeout = TimeSpan.FromSeconds(2) };
     private readonly DispatcherTimer _timer = new();
@@ -343,10 +347,7 @@ public partial class MainWindow : Window
     {
         var focus = adapters
             .Where(a =>
-                Contains(a.Name, "VMnet8") ||
-                Contains(a.Name, "NordLynx") ||
-                Contains(a.Name, "Tailscale") ||
-                string.Equals(a.Name, "Ethernet", StringComparison.OrdinalIgnoreCase))
+                IsFocusAdapter(a.Name))
             .Select(a => $"{a.Name}: {a.Status} | {a.Addresses}")
             .ToList();
 
@@ -385,7 +386,7 @@ public partial class MainWindow : Window
             if (isUp) up++;
 
             string name = GetString(a, "name");
-            if (Contains(name, "VMnet8") || Contains(name, "NordLynx") || Contains(name, "Tailscale") || name.Equals("Ethernet", StringComparison.OrdinalIgnoreCase))
+            if (IsFocusAdapter(name))
             {
                 important.Add($"{name}:{(isUp ? "up" : "down")}");
             }
@@ -399,6 +400,19 @@ public partial class MainWindow : Window
     {
         if (o[key] is not JsonArray arr) return "";
         return string.Join(", ", arr.Select(x => x?.ToString()).Where(x => !string.IsNullOrWhiteSpace(x)));
+    }
+
+    private static bool IsFocusAdapter(string? name)
+    {
+        if (string.IsNullOrWhiteSpace(name))
+            return false;
+
+        var configured = Environment.GetEnvironmentVariable("FORCEHUB_NETWORK_FOCUS_KEYWORDS");
+        var keywords = string.IsNullOrWhiteSpace(configured)
+            ? DefaultFocusAdapterKeywords
+            : configured.Split(new[] { ',', ';' }, StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+
+        return keywords.Any(keyword => Contains(name, keyword));
     }
 
     private static string FormatDuration(long seconds)
@@ -474,10 +488,10 @@ public partial class MainWindow : Window
     private void SetStatus(string msg) => StatusText.Text = $"{DateTime.Now:HH:mm:ss}  {msg}";
 
     private void StartServer_Click(object sender, RoutedEventArgs e) => RunScript("Start-ForceHubServer.ps1");
-    private void StartTunnel_Click(object sender, RoutedEventArgs e) => RunScript("Start-ForceHubTunnel.ps1");
-    private void StartGoLive_Click(object sender, RoutedEventArgs e) => RunScript("Start-GoLive-ForceHub.ps1");
-    private void StopGoLive_Click(object sender, RoutedEventArgs e) => RunScript("Stop-Live-ForceHub.ps1");
-    private void StopTunnel_Click(object sender, RoutedEventArgs e) => RunScript("Stop-ForceHubTunnel.ps1");
+    private void StartLocalIntegration_Click(object sender, RoutedEventArgs e) => RunScript("Start-LocalIntegration.ps1");
+    private void StartAgentWatch_Click(object sender, RoutedEventArgs e) => RunScript("Start-AgentWatch.ps1");
+    private void StopAgentWatch_Click(object sender, RoutedEventArgs e) => RunScript("Stop-AgentWatch.ps1");
+    private void StopLocalIntegration_Click(object sender, RoutedEventArgs e) => RunScript("Stop-LocalIntegration.ps1");
     private void StopServer_Click(object sender, RoutedEventArgs e) => RunScript("Stop-ForceHubServer.ps1");
     private void KillAll_Click(object sender, RoutedEventArgs e) => RunScript("Kill-All-ForceHub.ps1");
 

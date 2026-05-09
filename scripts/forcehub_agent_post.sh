@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-PROJECT_DIR="/home/flozi/projects/forcehub"
-TOKEN_FILE="$PROJECT_DIR/data/agent_token.txt"
-URL="${1:-http://127.0.0.1:8001/api/agents/checkin}"
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_DIR="${FORCEHUB_PROJECT_DIR:-$(cd "$SCRIPT_DIR/.." && pwd)}"
+TOKEN_FILE="${FORCEHUB_AGENT_TOKEN_FILE:-$PROJECT_DIR/runtime/agent_token.txt}"
+URL="${1:-${FORCEHUB_AGENT_CHECKIN_URL:-http://127.0.0.1:8001/api/agents/checkin}}"
 
 cd "$PROJECT_DIR"
 

@@ -1,6 +1,11 @@
 ﻿$ErrorActionPreference = "Stop"
 
-$ProjectRoot = "D:\Scripts\ForceHubAgent\ForceHubNativeMonitorV2"
+$ScriptRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
+$ProjectRoot = if ($env:FORCEHUB_NATIVE_MONITOR_V2_ROOT) {
+    $env:FORCEHUB_NATIVE_MONITOR_V2_ROOT
+} else {
+    (Resolve-Path (Join-Path $ScriptRoot "..\..\tools\native-monitor-v2")).Path
+}
 $PublishDir = Join-Path $ProjectRoot "publish"
 
 Write-Host "=== ForceHub Native Monitor V2 Build ==="

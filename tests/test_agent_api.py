@@ -36,14 +36,14 @@ def test_agent_checkin_and_list(monkeypatch, tmp_path):
         "version": "0.1.0",
         "target": "windows",
         "hostname": "TEST-PC",
-        "username": "Master",
+        "username": "test-user",
         "os": "Windows 11 build 26200",
         "arch": "x64",
         "cpu_threads": 12,
         "ram_mb": 16065,
         "uptime_seconds": 120323,
         "disks": [
-            {"mount": "C:\\", "total_gb": 231, "free_gb": 116}
+            {"mount": "SYSTEM_DRIVE", "total_gb": 231, "free_gb": 116}
         ],
     }
 
@@ -121,7 +121,7 @@ def test_agent_checkin_does_not_require_basic_auth_when_web_auth_enabled(monkeyp
         {
             "FORCEHUB_AGENT_TOKEN": "test-token",
             "FORCEHUB_USERNAME": "admin",
-            "FORCEHUB_PASSWORD": "secret",
+            "FORCEHUB_PASSWORD": "test-passphrase",
         },
     )
     main._FH_AGENT_DATA_FILE = tmp_path / "agents.json"

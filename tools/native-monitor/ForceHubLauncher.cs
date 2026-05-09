@@ -11,9 +11,12 @@ using System.Windows.Forms;
 
 public class ForceHubLauncher : Form
 {
-    private const string BaseDir = @"D:\Scripts\ForceHubAgent";
-    private const string ApiUrl = "http://127.0.0.1:18001/api/agents";
-    private const string TokenFile = @"D:\Scripts\ForceHubAgent\agent_token.txt";
+    private static readonly string BaseDir =
+        Environment.GetEnvironmentVariable("FORCEHUB_AGENT_HOME") ?? AppDomain.CurrentDomain.BaseDirectory;
+    private static readonly string ApiUrl =
+        Environment.GetEnvironmentVariable("FORCEHUB_AGENTS_URL") ?? "http://127.0.0.1:18001/api/agents";
+    private static readonly string TokenFile =
+        Environment.GetEnvironmentVariable("FORCEHUB_AGENT_TOKEN_FILE") ?? Path.Combine(BaseDir, "runtime", "agent_token.txt");
 
     private Label status;
     private Label summary;
@@ -54,7 +57,7 @@ public class ForceHubLauncher : Form
         refreshTimer.Interval = 3000;
         refreshTimer.Tick += delegate { RefreshAgents(false); };
 
-        summary.Text = "Start Server → Start Tunnel → Start Go Live → Refresh";
+        summary.Text = "Start Server -> Start Local Integration -> Start Agent Watch -> Refresh";
     }
 
     private void BuildLayout()
@@ -85,8 +88,8 @@ public class ForceHubLauncher : Form
         int y = 120;
 
         AddButton(sidebar, "Start Server", "Start-ForceHubServer.ps1", y, Accent); y += 46;
-        AddButton(sidebar, "Start Tunnel", "Start-ForceHubTunnel.ps1", y, Accent); y += 46;
-        AddButton(sidebar, "Start Go Live 3s", "Start-GoLive-ForceHub.ps1", y, Green); y += 46;
+        AddButton(sidebar, "Start Local Integration", "Start-LocalIntegration.ps1", y, Accent); y += 46;
+        AddButton(sidebar, "Start Agent Watch", "Start-AgentWatch.ps1", y, Green); y += 46;
 
         Button refresh = MakeButton("Refresh Now", y, Color.FromArgb(30, 41, 59));
         refresh.Click += delegate { RefreshAgents(true); };
@@ -110,8 +113,8 @@ public class ForceHubLauncher : Form
         sidebar.Controls.Add(stopAuto);
         y += 58;
 
-        AddButton(sidebar, "Stop Go Live", "Stop-Live-ForceHub.ps1", y, Color.FromArgb(120, 53, 15)); y += 46;
-        AddButton(sidebar, "Stop Tunnel", "Stop-ForceHubTunnel.ps1", y, Color.FromArgb(120, 53, 15)); y += 46;
+        AddButton(sidebar, "Stop Agent Watch", "Stop-AgentWatch.ps1", y, Color.FromArgb(120, 53, 15)); y += 46;
+        AddButton(sidebar, "Stop Local Integration", "Stop-LocalIntegration.ps1", y, Color.FromArgb(120, 53, 15)); y += 46;
         AddButton(sidebar, "Stop Server", "Stop-ForceHubServer.ps1", y, Color.FromArgb(120, 53, 15)); y += 46;
         AddButton(sidebar, "Kill All", "Kill-All-ForceHub.ps1", y, Color.FromArgb(127, 29, 29)); y += 58;
 
@@ -512,7 +515,7 @@ public class ForceHubLauncher : Form
             if (showPopupOnError)
             {
                 MessageBox.Show(
-                    "Failed to refresh agents.\n\n" + ex.Message + "\n\nCheck:\n1. Start Server\n2. Start Tunnel\n3. agent_token.txt exists",
+                    "Failed to refresh agents.\n\n" + ex.Message + "\n\nCheck:\n1. Start Server\n2. Start Local Integration\n3. agent token file exists",
                     "ForceHub",
                     MessageBoxButtons.OK,
                     MessageBoxIcon.Warning
@@ -555,10 +558,7 @@ public class ForceHubLauncher : Form
             if (isUp) up++;
 
             string name = GetStr(a, "name");
-            if (name.IndexOf("VMnet8", StringComparison.OrdinalIgnoreCase) >= 0 ||
-                name.IndexOf("NordLynx", StringComparison.OrdinalIgnoreCase) >= 0 ||
-                name.IndexOf("Tailscale", StringComparison.OrdinalIgnoreCase) >= 0 ||
-                name.Equals("Ethernet", StringComparison.OrdinalIgnoreCase))
+            if (IsFocusAdapter(name))
             {
                 important.Add(name + ":" + (isUp ? "up" : "down"));
             }
@@ -592,9 +592,7 @@ public class ForceHubLauncher : Form
             int idx = networkGrid.Rows.Add(name, statusText, mtu, ips);
             networkGrid.Rows[idx].Cells["status"].Style.ForeColor = isUp ? Green : Red;
 
-            if (name.IndexOf("VMnet8", StringComparison.OrdinalIgnoreCase) >= 0 ||
-                name.IndexOf("NordLynx", StringComparison.OrdinalIgnoreCase) >= 0 ||
-                name.IndexOf("Tailscale", StringComparison.OrdinalIgnoreCase) >= 0)
+            if (IsFocusAdapter(name))
             {
                 networkGrid.Rows[idx].DefaultCellStyle.ForeColor = Color.FromArgb(147, 197, 253);
             }
@@ -691,6 +689,23 @@ public class ForceHubLauncher : Form
         }
 
         return String.Join(", ", parts.ToArray());
+    }
+
+    private static bool IsFocusAdapter(string name)
+    {
+        if (String.IsNullOrWhiteSpace(name)) return false;
+
+        string configured = Environment.GetEnvironmentVariable("FORCEHUB_NETWORK_FOCUS_KEYWORDS") ?? "Ethernet,Wi-Fi,Loopback";
+        string[] keywords = configured.Split(new char[] { ',', ';' }, StringSplitOptions.RemoveEmptyEntries);
+
+        foreach (string raw in keywords)
+        {
+            string keyword = raw.Trim();
+            if (keyword.Length > 0 && name.IndexOf(keyword, StringComparison.OrdinalIgnoreCase) >= 0)
+                return true;
+        }
+
+        return false;
     }
 
     private string FormatMemory(Dictionary<string, object> payload)

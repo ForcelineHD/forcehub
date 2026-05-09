@@ -29,6 +29,8 @@ build/
 # Go
 bin/
 coverage.out
+target/
+**/target/
 
 # Local editor and OS files
 .DS_Store

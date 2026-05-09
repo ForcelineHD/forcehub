@@ -35,8 +35,8 @@
                                Margin="0,3,0,26"/>
 
                     <Button Content="Start Server" Click="StartServer_Click" Background="{StaticResource Accent}" BorderBrush="{StaticResource Accent}"/>
-                    <Button Content="Start Tunnel" Click="StartTunnel_Click" Background="{StaticResource Accent}" BorderBrush="{StaticResource Accent}"/>
-                    <Button Content="Start Go Live 3s" Click="StartGoLive_Click" Background="{StaticResource Green}" BorderBrush="{StaticResource Green}"/>
+                    <Button Content="Start Local Integration" Click="StartLocalIntegration_Click" Background="{StaticResource Accent}" BorderBrush="{StaticResource Accent}"/>
+                    <Button Content="Start Agent Watch" Click="StartAgentWatch_Click" Background="{StaticResource Green}" BorderBrush="{StaticResource Green}"/>
 
                     <Separator/>
 
@@ -46,8 +46,8 @@
 
                     <Separator/>
 
-                    <Button Content="Stop Go Live" Click="StopGoLive_Click" Background="{StaticResource Orange}" BorderBrush="{StaticResource Orange}"/>
-                    <Button Content="Stop Tunnel" Click="StopTunnel_Click" Background="{StaticResource Orange}" BorderBrush="{StaticResource Orange}"/>
+                    <Button Content="Stop Agent Watch" Click="StopAgentWatch_Click" Background="{StaticResource Orange}" BorderBrush="{StaticResource Orange}"/>
+                    <Button Content="Stop Local Integration" Click="StopLocalIntegration_Click" Background="{StaticResource Orange}" BorderBrush="{StaticResource Orange}"/>
                     <Button Content="Stop Server" Click="StopServer_Click" Background="{StaticResource Orange}" BorderBrush="{StaticResource Orange}"/>
                     <Button Content="Kill All" Click="KillAll_Click" Background="{StaticResource Red}" BorderBrush="{StaticResource Red}"/>
 
@@ -236,7 +236,7 @@
                     </Grid>
 
                     <StackPanel Grid.Column="4" VerticalAlignment="Center">
-                        <TextBlock Text="Tunnel / API" Style="{StaticResource SectionTitle}"/>
+                        <TextBlock Text="Local Integration / API" Style="{StaticResource SectionTitle}"/>
                         <TextBlock x:Name="ApiMetric"
                                    Text="--"
                                    FontSize="22"
