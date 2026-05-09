@@ -1,31 +1,42 @@
-.venv/
-.deps/
-__pycache__/
-*.pyc
-server.out
-server.err
-__pycache__/
-*.pyc
+# Environment and secrets
 .env
-.pytest_cache/
+.env.*
+!.env.example
+secrets/
 
-# Runtime local data
-data/chats.json
-data/project_cache.json
-data/project_settings.json
-logs/
-*.pid
-*.log
-build/
-*.exe
-data/agents.json
-data/agent_token.txt
-app/main.py.bak.agent_api_*
-
-# ForceHub runtime data / secrets
+# Runtime data
 data/
 logs/
+runtime/
+*.db
+*.sqlite
+*.sqlite3
 
-# Rust build output
-target/
-**/target/
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Node / frontend
+node_modules/
+dist/
+build/
+
+# Go
+bin/
+coverage.out
+
+# Local editor and OS files
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
+# Local process output
+server.out
+server.err
+*.log

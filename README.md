@@ -1,55 +1,104 @@
 # ForceHub
 
-ForceHub is a local FastAPI dashboard for browsing project files, running common repo checks, and sending project-aware prompts to a local Ollama instance.
+**Local-first IT / automation / local-AI dashboard**
 
-## Requirements
+ForceHub is an active development project for organizing local infrastructure workflows, diagnostics, automation, and local AI tooling in one dashboard-oriented workspace.
 
-- Python 3.11+
-- `git` on `PATH` for git actions
-- Optional tools for advanced checks:
-  - `pytest`
-  - `ruff`
-  - `bandit`
-  - `cmake`
-  - `cppcheck`
-  - `clang-tidy`
-  - `npm`
+The public version of this repository is designed as a clean portfolio-safe foundation. It documents the project direction, expected modules, safe configuration patterns, and security model without exposing private infrastructure, runtime data, credentials, or local environment details.
 
-Install the Python dependencies with:
+## Project Status
 
-```bash
-python -m pip install -r requirements.txt
+**Active development**
+
+This repository currently provides the public-safe foundation for ForceHub. Implementation modules will be added only after they are reviewed, sanitized, and documented for public release.
+
+## Planned Architecture
+
+| Component | Direction |
+|---|---|
+| FastAPI backend | Local API service for dashboard data, automation endpoints, diagnostics, and local workflow orchestration. |
+| Go agent | Lightweight local agent for system checks, command execution wrappers, and host diagnostics using explicit allowlists. |
+| Local dashboard | Browser-based interface for viewing system state, running safe workflows, and organizing infrastructure notes. |
+| Local AI tooling | Ollama-backed helpers for summarizing notes, generating command drafts, and supporting developer workflows. |
+| Configuration examples | Public-safe `.env.example` values and documented placeholder configuration. |
+| Automation and diagnostics | Repeatable scripts and workflows for IT support, Linux labs, networking checks, and troubleshooting. |
+
+## Core Goals
+
+- Keep ForceHub local-first by default.
+- Support practical IT infrastructure and troubleshooting workflows.
+- Provide safe examples for FastAPI services, Go agents, local dashboards, and local AI integrations.
+- Use clear documentation for setup, architecture, and security boundaries.
+- Avoid committing private data, runtime artifacts, logs, secrets, or infrastructure-specific details.
+
+## Planned Features
+
+- FastAPI service with health checks and authenticated local API routes.
+- Go-based local agent for controlled diagnostics.
+- Dashboard views for systems, services, workflows, and notes.
+- Safe example configuration for local development.
+- Automation examples for Windows, Linux, networking, and lab environments.
+- Local AI workflow helpers using Ollama.
+- GitHub Actions checks for repository hygiene and expected file structure.
+
+## Repository Structure
+
+```text
+forcehub/
+├─ README.md
+├─ LICENSE
+├─ SECURITY.md
+├─ .gitignore
+├─ .env.example
+├─ docs/
+│  ├─ architecture.md
+│  ├─ setup.md
+│  └─ security-model.md
+└─ .github/
+   └─ workflows/
+      └─ ci.yml
 ```
 
-## Run
+## Safe Setup
+
+These instructions use placeholders only. Review configuration before running any future ForceHub service locally.
 
 ```bash
-python main.py
+cd forcehub
+cp .env.example .env
 ```
 
-The app listens on `127.0.0.1:8000` by default.
+Example local configuration:
 
-## Configuration
+```dotenv
+FORCEHUB_API_TOKEN=change-me
+FORCEHUB_BIND_HOST=127.0.0.1
+FORCEHUB_BIND_PORT=8001
+FORCEHUB_LOG_LEVEL=info
+FORCEHUB_OLLAMA_BASE_URL=http://127.0.0.1:11434
+```
 
-- `FORCEHUB_PROJECTS_DIR`: directory that contains the projects ForceHub should inspect
-- `FORCEHUB_DEFAULT_PROJECT`: project selected by default in the UI; if unset, the UI selects the first allowed project
-- `FORCEHUB_DATA_DIR`: directory used for chat history and cached settings
-- `FORCEHUB_USERNAME`: basic-auth username
-- `FORCEHUB_PASSWORD`: basic-auth password
-- `FORCEHUB_PASSWORD_FILE`: path to a file containing the basic-auth password
-- `FORCEHUB_AUTH_DISABLED`: set to `1` only for an intentionally unauthenticated local instance
-- `FORCEHUB_OLLAMA_URL`: Ollama base URL, default `http://127.0.0.1:11434`
-- `FORCEHUB_OLLAMA_GENERATE_URL`: full Ollama generate endpoint override
-- `FORCEHUB_OLLAMA_TAGS_URL`: full Ollama tags endpoint override
-- `FORCEHUB_DEFAULT_MODEL`: default model used when a request does not specify one
-- `FORCEHUB_DEFAULT_MODE`: default chat mode, default `normal`
-- `FORCEHUB_HOST`: bind host for the FastAPI server
-- `FORCEHUB_PORT`: bind port for the FastAPI server
-- `FORCEHUB_GIT_BIN`: explicit path to the `git` executable
-- `FORCEHUB_LOG_LEVEL`: app log level, default `INFO`
-- `FORCEHUB_LOG_FILE`: optional rotating log file path; unset keeps app logs off disk
-- `FORCEHUB_LOG_MAX_BYTES`: maximum size for one log file before rotation
-- `FORCEHUB_LOG_BACKUP_COUNT`: number of rotated log files to keep
-- `FORCEHUB_RATE_LIMIT_REQUESTS`: requests allowed per client/path window, default `120`
-- `FORCEHUB_RATE_LIMIT_WINDOW_SECONDS`: rate-limit window in seconds, default `60`
-- `FORCEHUB_RATE_LIMIT_DISABLED`: set to `1` to disable rate limiting
+Do not commit the generated `.env` file. Keep local tokens, host details, logs, databases, and runtime output outside Git.
+
+## Security & Privacy
+
+ForceHub is intended to run locally by default. Public examples use sanitized placeholder values and avoid private infrastructure details.
+
+Public repository content must not include:
+
+- Secrets, tokens, passwords, or API keys.
+- Private IP addresses, local hostnames, tunnel details, or private file paths.
+- Runtime data, logs, databases, screenshots, or sensitive diagnostics.
+- Real infrastructure notes that identify private systems or environments.
+
+See [SECURITY.md](SECURITY.md) and [docs/security-model.md](docs/security-model.md) for the public-safe security model.
+
+## Documentation
+
+- [Architecture](docs/architecture.md)
+- [Setup](docs/setup.md)
+- [Security Model](docs/security-model.md)
+
+## License
+
+This project is licensed under the MIT License. See [LICENSE](LICENSE).
