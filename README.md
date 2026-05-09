@@ -4,15 +4,25 @@
 
 ForceHub is an active development project for organizing local infrastructure workflows, diagnostics, automation, and local AI tooling in one dashboard-oriented workspace.
 
-The public version of this repository is designed as a clean portfolio-safe foundation. It documents the project direction, expected modules, safe configuration patterns, and security model without exposing private infrastructure, runtime data, credentials, or local environment details.
+The public version of this repository is designed as a clean portfolio-safe project. It documents the project direction, active implementation modules, safe configuration patterns, and security model without exposing private infrastructure, runtime data, credentials, or local environment details.
 
 ## Project Status
 
-**Active development**
+**Public foundation released with active implementation modules.**
 
-This repository currently provides the public-safe foundation for ForceHub. Implementation modules will be added only after they are reviewed, sanitized, and documented for public release.
+Implementation modules are being added incrementally after review, sanitization, and documentation.
 
-## Planned Architecture
+## Current Public Components
+
+- **FastAPI backend** for local dashboard routes, API access, diagnostics, and workflow endpoints.
+- **Go agent** for local system telemetry and controlled check-ins.
+- **Native monitor tooling** for local desktop visibility into agents and diagnostics.
+- **Rust security scanner** for repository hygiene checks around secrets, runtime data, and build artifacts.
+- **Scripts and diagnostics** for local development, service control, and agent API workflows.
+- **Tests and CI** for API behavior, dashboard rendering, security checks, and repository validation.
+- **Public-safe docs** covering architecture, setup, and the local-first security model.
+
+## Architecture Direction
 
 | Component | Direction |
 |---|---|
@@ -45,15 +55,24 @@ This repository currently provides the public-safe foundation for ForceHub. Impl
 
 ```text
 forcehub/
-├─ README.md
-├─ LICENSE
-├─ SECURITY.md
-├─ .gitignore
-├─ .env.example
-└─ docs/
-   ├─ architecture.md
-   ├─ setup.md
-   └─ security-model.md
+|-- README.md
+|-- LICENSE
+|-- SECURITY.md
+|-- .gitignore
+|-- .env.example
+|-- app/
+|-- agent/
+|-- scripts/
+|-- tools/
+|-- tests/
+|-- rust/
+|   `-- forcehub-secscan/
+|-- .github/
+|   `-- workflows/
+`-- docs/
+    |-- architecture.md
+    |-- setup.md
+    `-- security-model.md
 ```
 
 ## Safe Setup
