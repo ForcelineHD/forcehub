@@ -39,7 +39,7 @@ This repository currently provides the public-safe foundation for ForceHub. Impl
 - Safe example configuration for local development.
 - Automation examples for Windows, Linux, networking, and lab environments.
 - Local AI workflow helpers using Ollama.
-- GitHub Actions checks for repository hygiene and expected file structure.
+- Future CI checks for repository hygiene and expected file structure.
 
 ## Repository Structure
 
@@ -50,13 +50,10 @@ forcehub/
 ├─ SECURITY.md
 ├─ .gitignore
 ├─ .env.example
-├─ docs/
-│  ├─ architecture.md
-│  ├─ setup.md
-│  └─ security-model.md
-└─ .github/
-   └─ workflows/
-      └─ ci.yml
+└─ docs/
+   ├─ architecture.md
+   ├─ setup.md
+   └─ security-model.md
 ```
 
 ## Safe Setup
