@@ -1,7 +1,7 @@
-$ErrorActionPreference = "Stop"
+﻿$ErrorActionPreference = "Stop"
 
 $ProjectRoot = "D:\Scripts\ForceHubAgent\ForceHubNativeMonitorV2"
-$PublishDir = "D:\Scripts\ForceHubAgent\ForceHubNativeMonitorV2\publish"
+$PublishDir = Join-Path $ProjectRoot "publish"
 
 Write-Host "=== ForceHub Native Monitor V2 Build ==="
 
@@ -13,8 +13,7 @@ cd $ProjectRoot
 
 Get-Process ForceHubNativeMonitorV2 -ErrorAction SilentlyContinue | Stop-Process -Force
 
-Remove-Item .\bin,.\obj -Recurse -Force -ErrorAction SilentlyContinue
-Remove-Item $PublishDir -Recurse -Force -ErrorAction SilentlyContinue
+Remove-Item ".\bin",".\obj",$PublishDir -Recurse -Force -ErrorAction SilentlyContinue
 
 dotnet build
 
