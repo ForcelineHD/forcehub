@@ -470,8 +470,8 @@ Usage:
   ForceHubAgent-Go.exe
   ForceHubAgent-Go.exe --once
   ForceHubAgent-Go.exe --watch --interval 3
-  ForceHubAgent-Go.exe --post --server http://127.0.0.1:18001/api/agents/checkin --token-file D:\Scripts\ForceHubAgent\agent_token.txt
-  ForceHubAgent-Go.exe --watch --post --interval 3 --server http://127.0.0.1:18001/api/agents/checkin --token-file D:\Scripts\ForceHubAgent\agent_token.txt
+  ForceHubAgent-Go.exe --post --server http://127.0.0.1:18001/api/agents/checkin --token-file .\runtime\agent_token.txt
+  ForceHubAgent-Go.exe --watch --post --interval 3 --server http://127.0.0.1:18001/api/agents/checkin --token-file .\runtime\agent_token.txt
 
 Options:
 `, agentName, agentVersion)

@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ROOT="/home/flozi/projects/forcehub"
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+ROOT="${FORCEHUB_PROJECT_DIR:-$(cd "$SCRIPT_DIR/../.." && pwd)}"
 SRC="$ROOT/agent/cpp/forcehub_agent.cpp"
 OUT_DIR="$ROOT/build/windows"
 OUT="$OUT_DIR/ForceHubAgent.exe"
