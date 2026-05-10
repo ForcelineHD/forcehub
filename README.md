@@ -12,15 +12,19 @@ The public version of this repository is designed as a clean portfolio-safe proj
 
 Implementation modules are being added incrementally after review, sanitization, and documentation.
 
-## Current Public Components
+## Components
 
-- **FastAPI backend** for local dashboard routes, API access, diagnostics, and workflow endpoints.
-- **Go agent** for local system telemetry and controlled check-ins.
-- **Native monitor tooling** for local desktop visibility into agents and diagnostics.
-- **Rust security scanner** for repository hygiene checks around secrets, runtime data, and build artifacts.
-- **Scripts and diagnostics** for local development, service control, and agent API workflows.
-- **Tests and CI** for API behavior, dashboard rendering, security checks, and repository validation.
-- **Public-safe docs** covering architecture, setup, and the local-first security model.
+ForceHub is a local-first platform repository made of connected tools for local AI, IT automation, telemetry, safe developer workflows, and system diagnostics.
+
+| Component | Path | Purpose |
+|---|---|---|
+| **ForceHub Chat Pro** | `app/main.py` | Browser-based local AI coding dashboard for project chat, file review, patch/diff preview, Git/check helpers, and local model workflows. |
+| **ForceHub Native Monitor V2** | `tools/native-monitor-v2/` | Windows desktop IT/agent monitor for starting ForceHub services, managing local integrations, viewing live agents, and inspecting system telemetry. |
+| **Go ForceHub Agent** | `agent/go/` | Native telemetry/check-in agent that posts system and device data to the ForceHub backend. |
+| **C++ Native Agent/Tooling** | `agent/cpp/` | Native tooling experiments for Windows/system-level telemetry and performance-focused components. |
+| **Rust Security Scanner** | `rust/forcehub-secscan/` | Local security scanning module for repository hygiene, risky files, secret patterns, runtime data, and future security findings. |
+| **Scripts** | `scripts/` | Helper scripts for launching ForceHub, checking agents, building tools, and running project checks. |
+| **Docs** | `docs/` | Setup, architecture, security model, and development notes. |
 
 ## Architecture Direction
 
@@ -55,24 +59,20 @@ Implementation modules are being added incrementally after review, sanitization,
 
 ```text
 forcehub/
-|-- README.md
-|-- LICENSE
-|-- SECURITY.md
-|-- .gitignore
-|-- .env.example
-|-- app/
-|-- agent/
-|-- scripts/
-|-- tools/
-|-- tests/
-|-- rust/
-|   `-- forcehub-secscan/
-|-- .github/
-|   `-- workflows/
-`-- docs/
-    |-- architecture.md
-    |-- setup.md
-    `-- security-model.md
+├── app/                         # ForceHub Chat Pro backend/web app
+├── tools/native-monitor-v2/     # ForceHub Native Monitor V2 Windows app
+├── agent/go/                    # Go ForceHub Agent
+├── agent/cpp/                   # C++ native tooling
+├── rust/forcehub-secscan/       # Rust security scanner
+├── scripts/                     # launch/build/check helpers
+├── docs/                        # documentation
+├── tests/                       # backend/tests
+├── .github/workflows/           # CI workflows
+├── README.md
+├── SECURITY.md
+├── LICENSE
+├── .gitignore
+└── .env.example
 ```
 
 ## Safe Setup
@@ -103,7 +103,7 @@ ForceHub is intended to run locally by default. Public examples use sanitized pl
 Public repository content must not include:
 
 - Secrets, tokens, passwords, or API keys.
-- Private IP addresses, local hostnames, tunnel details, or private file paths.
+- Private IP addresses, local hostnames, integration details, or private file paths.
 - Runtime data, logs, databases, screenshots, or sensitive diagnostics.
 - Real infrastructure notes that identify private systems or environments.
 
