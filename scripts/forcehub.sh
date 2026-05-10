@@ -86,19 +86,21 @@ validate_auth_config() {
 
 
 
-http_code() {
-  curl -s -o /dev/null -w "%{http_code}" "http://$HOST:$PORT/" || true
+agent_api_code() {
+  curl -s -o /dev/null -w "%{http_code}" \
+    -H "X-ForceHub-Agent-Token: ${FORCEHUB_AGENT_TOKEN:-}" \
+    "http://$HOST:$PORT/api/agents" || true
 }
 
-http_alive() {
-  CODE="$(http_code)"
+agent_api_alive() {
+  CODE="$(agent_api_code)"
   case "$CODE" in
-    200|301|302|401|403)
-      echo "HTTP reachable: $CODE"
+    200)
+      echo "Agent API reachable: $CODE"
       return 0
       ;;
     *)
-      echo "HTTP not ready: $CODE"
+      echo "Agent API check failed: $CODE"
       return 1
       ;;
   esac
@@ -107,7 +109,8 @@ http_alive() {
 start() {
   if [ -f "$PID_FILE" ] && kill -0 "$(cat "$PID_FILE")" 2>/dev/null; then
     echo "ForceHub already running. PID: $(cat "$PID_FILE")"
-    http_alive || true
+    load_agent_token
+    agent_api_alive || true
     exit 0
   fi
 
@@ -122,8 +125,8 @@ start() {
 
   if kill -0 "$(cat "$PID_FILE")" 2>/dev/null; then
     echo "ForceHub started. PID: $(cat "$PID_FILE")"
-    http_alive || {
-      echo "Process is running, but HTTP check failed. Last logs:"
+    agent_api_alive || {
+      echo "Process is running, but Agent API check failed. Last logs:"
       tail -80 "$LOG_FILE"
       exit 1
     }
@@ -163,7 +166,8 @@ status() {
   echo
 
   echo "== HTTP =="
-  http_alive || true
+  load_agent_token
+  agent_api_alive || true
 }
 
 restart() {
