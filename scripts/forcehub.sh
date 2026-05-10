@@ -4,8 +4,8 @@ set -euo pipefail
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="${FORCEHUB_PROJECT_DIR:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 VENV="${FORCEHUB_VENV:-$PROJECT_DIR/.venv}"
-HOST="${FORCEHUB_BIND_HOST:-127.0.0.1}"
-PORT="${FORCEHUB_BIND_PORT:-8001}"
+HOST="127.0.0.1"
+PORT="8001"
 LOG_DIR="${FORCEHUB_LOG_DIR:-$PROJECT_DIR/logs}"
 PID_FILE="$LOG_DIR/forcehub.pid"
 LOG_FILE="$LOG_DIR/forcehub.log"
@@ -20,16 +20,6 @@ fi
 source "$VENV/bin/activate"
 mkdir -p "$LOG_DIR"
 
-TOKEN_FILE="${FORCEHUB_AGENT_TOKEN_FILE:-$PROJECT_DIR/runtime/agent_token.txt}"
-mkdir -p "$(dirname "$TOKEN_FILE")"
-
-if [ ! -f "$TOKEN_FILE" ]; then
-  openssl rand -hex 32 > "$TOKEN_FILE"
-  chmod 600 "$TOKEN_FILE"
-fi
-
-export FORCEHUB_AGENT_TOKEN="$(cat "$TOKEN_FILE")"
-
 # FORCEHUB_AUTH_DEFAULTS
 # Load local environment if present, then preserve caller-provided values.
 # Authentication is enabled by default; set FORCEHUB_AUTH_DISABLED=1 only for an intentionally unauthenticated local instance.
@@ -41,6 +31,34 @@ if [ -f "$PROJECT_DIR/.env" ]; then
 fi
 
 export FORCEHUB_AUTH_DISABLED="${FORCEHUB_AUTH_DISABLED:-0}"
+
+TOKEN_FILE="${FORCEHUB_AGENT_TOKEN_FILE:-$PROJECT_DIR/data/agent_token.txt}"
+
+load_agent_token() {
+  local token_source
+
+  if [ -n "${FORCEHUB_AGENT_TOKEN:-}" ]; then
+    FORCEHUB_AGENT_TOKEN="$(printf '%s' "$FORCEHUB_AGENT_TOKEN" | tr -d '\r\n')"
+    token_source="env"
+  else
+    mkdir -p "$(dirname "$TOKEN_FILE")"
+    chmod 700 "$(dirname "$TOKEN_FILE")"
+
+    if [ ! -f "$TOKEN_FILE" ]; then
+      umask 077
+      openssl rand -hex 32 > "$TOKEN_FILE"
+      chmod 600 "$TOKEN_FILE"
+    fi
+
+    FORCEHUB_AGENT_TOKEN="$(tr -d '\r\n' < "$TOKEN_FILE")"
+    token_source="data/agent_token.txt"
+  fi
+
+  export FORCEHUB_AGENT_TOKEN
+  echo "agent token loaded"
+  echo "agent token source: $token_source"
+  echo "agent token length: ${#FORCEHUB_AGENT_TOKEN}"
+}
 
 validate_auth_config() {
   if [ "$FORCEHUB_AUTH_DISABLED" = "1" ]; then
@@ -94,9 +112,10 @@ start() {
   fi
 
   validate_auth_config
+  load_agent_token
 
   echo "Starting ForceHub on http://$HOST:$PORT ..."
-  nohup python -m uvicorn app.main:app --host "$HOST" --port "$PORT" --reload > "$LOG_FILE" 2>&1 &
+  nohup "$VENV/bin/python" -m uvicorn app.main:app --host 127.0.0.1 --port 8001 --reload > "$LOG_FILE" 2>&1 &
   echo $! > "$PID_FILE"
 
   sleep 2
