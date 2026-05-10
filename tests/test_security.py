@@ -83,6 +83,65 @@ def test_file_whitelist_rejects_sensitive_dotenv(monkeypatch, tmp_path):
         main.safe_file_path("proj", ".env")
 
 
+def test_project_index_returns_safe_metadata_without_file_contents(monkeypatch, tmp_path):
+    projects_dir, project_dir = create_project(tmp_path)
+    (project_dir / "docs").mkdir()
+    (project_dir / "docs" / "guide.md").write_text("# Guide\n", encoding="utf-8")
+    (project_dir / "web.js").write_text("const token = 'not returned';\n", encoding="utf-8")
+    (project_dir / "tests").mkdir()
+    (project_dir / "tests" / "test_app.py").write_text("def test_ok(): pass\n", encoding="utf-8")
+    (project_dir / "logs").mkdir()
+    (project_dir / "logs" / "app.log").write_text("runtime\n", encoding="utf-8")
+    (project_dir / "build").mkdir()
+    (project_dir / "build" / "bundle.js").write_text("built\n", encoding="utf-8")
+    main = import_main(monkeypatch, app_env(tmp_path, projects_dir))
+    monkeypatch.setattr(main, "git_tracked_project_files", lambda project, root: None)
+
+    response = TestClient(main.app).get("/api/project-index", params={"project": "proj"})
+
+    assert response.status_code == 200
+    data = response.json()
+    paths = {item["path"] for item in data["files"]}
+    assert {"main.py", "docs/guide.md", "web.js", "tests/test_app.py"} <= paths
+    assert ".env" not in paths
+    assert "logs/app.log" not in paths
+    assert "build/bundle.js" not in paths
+    assert data["categories"]["python"] == 1
+    assert data["categories"]["docs"] == 1
+    assert data["categories"]["frontend"] == 1
+    assert data["categories"]["test"] == 1
+    assert all(set(item) == {"path", "extension", "type", "size", "category"} for item in data["files"])
+    assert "print('ok')" not in response.text
+    assert "not returned" not in response.text
+
+
+def test_project_index_prefers_git_tracked_files_and_revalidates_paths(monkeypatch, tmp_path):
+    projects_dir, project_dir = create_project(tmp_path)
+    (project_dir / "tracked.py").write_text("print('tracked')\n", encoding="utf-8")
+    (project_dir / "untracked.py").write_text("print('untracked')\n", encoding="utf-8")
+    (project_dir / "docs").mkdir()
+    (project_dir / "docs" / "guide.md").write_text("# Guide\n", encoding="utf-8")
+    (project_dir / "build").mkdir()
+    (project_dir / "build" / "bundle.js").write_text("built\n", encoding="utf-8")
+    main = import_main(monkeypatch, app_env(tmp_path, projects_dir))
+    monkeypatch.setattr(main.shutil, "which", lambda name: "/usr/bin/git")
+
+    def fake_check_output(command, cwd, stderr, timeout):
+        assert command[1:] == ["ls-files", "-z", "--"]
+        assert cwd == project_dir.resolve()
+        return b"tracked.py\0docs/guide.md\0.env\0../outside.py\0build/bundle.js\0"
+
+    monkeypatch.setattr(main.subprocess, "check_output", fake_check_output)
+
+    response = TestClient(main.app).get("/api/project-index", params={"project": "proj"})
+
+    assert response.status_code == 200
+    data = response.json()
+    assert [item["path"] for item in data["files"]] == ["docs/guide.md", "tracked.py"]
+    assert data["total"] == 2
+    assert data["truncated"] is False
+
+
 def test_save_file_size_limit_in_model_and_api(monkeypatch, tmp_path):
     projects_dir, _ = create_project(tmp_path)
     main = import_main(monkeypatch, app_env(tmp_path, projects_dir))
