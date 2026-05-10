@@ -713,16 +713,41 @@ def safe_file_path(project: str, file: str) -> Path:
 def should_include_file(path: Path) -> bool:
     blocked_dirs = {
         ".git", ".venv", "venv", "__pycache__", "node_modules",
-        ".mypy_cache", ".pytest_cache", ".ruff_cache", "dist", "build", "data",
+        ".cache", ".mypy_cache", ".pytest_cache", ".ruff_cache", ".tox",
+        ".next", ".nuxt", "coverage", "dist", "build", "out", "target",
+        "data", "log", "logs", "runtime", "secret", "secrets",
     }
-    if any(part in blocked_dirs for part in path.parts):
+    if any(part.lower() in blocked_dirs for part in path.parts):
         return False
     allowed_ext = {
         ".py", ".md", ".txt", ".toml", ".json", ".yaml", ".yml",
-        ".html", ".css", ".js", ".ts", ".sh",
+        ".html", ".css", ".js", ".ts", ".sh", ".go", ".rs",
         ".c", ".cc", ".cpp", ".cxx", ".h", ".hh", ".hpp", ".hxx",
     }
     return path.suffix.lower() in allowed_ext or path.name in {"Dockerfile", ".gitignore", "CMakeLists.txt", "Makefile"}
+
+
+def project_file_category(path: Path) -> str:
+    suffix = path.suffix.lower()
+    name = path.name
+    parts = {part.lower() for part in path.parts}
+    if suffix == ".py":
+        return "test" if name.startswith("test_") or "tests" in parts else "python"
+    if suffix == ".go":
+        return "test" if name.endswith("_test.go") else "go"
+    if suffix == ".rs":
+        return "rust"
+    if suffix in {".md", ".txt"}:
+        return "docs"
+    if suffix in {".toml", ".json", ".yaml", ".yml"} or name in {"Dockerfile", "CMakeLists.txt", "Makefile", ".gitignore"}:
+        return "config"
+    if suffix == ".sh":
+        return "script"
+    if suffix in {".html", ".css", ".js", ".ts"}:
+        return "test" if "test" in name.lower() or "tests" in parts else "frontend"
+    if suffix in {".c", ".cc", ".cpp", ".cxx", ".h", ".hh", ".hpp", ".hxx"}:
+        return "cpp"
+    return "other"
 
 
 def iter_project_files(root: Path):
@@ -746,6 +771,36 @@ def iter_project_files(root: Path):
             continue
         seen.add(resolved)
         yield resolved
+
+
+def git_tracked_project_files(project: str, root: Path) -> list[Path] | None:
+    git = shutil.which("git")
+    if not git:
+        return None
+    try:
+        output = subprocess.check_output(
+            [git, "ls-files", "-z", "--"],
+            cwd=root,
+            stderr=subprocess.DEVNULL,
+            timeout=10,
+        )
+    except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
+        return None
+
+    files = []
+    seen: set[Path] = set()
+    for raw in output.decode("utf-8", errors="replace").split("\0"):
+        if not raw:
+            continue
+        try:
+            target = safe_file_path(project, raw)
+        except ValueError:
+            continue
+        if target in seen:
+            continue
+        seen.add(target)
+        files.append(target)
+    return files
 
 
 def format_truncation_warning(path: Path | str, max_chars: int) -> str:
@@ -1225,6 +1280,8 @@ button{border:0;border-radius:10px;background:var(--blue);color:white;font-weigh
 button:disabled{background:#3a3f50;cursor:wait}.secondary{background:#2a3040;width:100%;margin-top:8px}.action{background:#26385f;width:100%;margin-top:8px;text-align:left}
 .badge{font-size:12px;color:#b7c7ff}.grid2{display:grid;grid-template-columns:1fr 1fr;gap:8px}
 .editor{width:100%;height:280px;background:#0b0d12;color:#e6e6e6;border:1px solid #30384d;border-radius:8px;padding:10px;font-family:Consolas,monospace;font-size:13px}
+.indexPanel{margin-top:8px;border:1px solid #30384d;border-radius:8px;background:#0f1117;padding:10px;max-height:220px;overflow:auto;font-size:12px;line-height:1.4}
+.indexMeta{color:#b7c7ff;margin-bottom:8px}.indexHint{color:var(--muted);margin-top:8px}.indexFile{display:grid;grid-template-columns:1fr auto;gap:8px;border-top:1px solid #252b3a;padding:6px 0}.indexPath{overflow-wrap:anywhere}.indexTag{color:#9fb0d0}
 </style>
 </head>
 <body>
@@ -1295,6 +1352,13 @@ button:disabled{background:#3a3f50;cursor:wait}.secondary{background:#2a3040;wid
 
 <div class="control"><label>Search project</label><input id="search" placeholder="Search text..."><button class="action" onclick="searchProject()">Search</button></div>
 
+<div class="control">
+<label>Project Context</label>
+<button class="action" onclick="loadProjectIndex()">Refresh index</button>
+<div id="projectIndex" class="indexPanel">
+<div class="indexHint">Project index loads safe metadata only.</div>
+</div>
+</div>
 
 <div class="control">
 <label>Project settings</label>
@@ -1333,9 +1397,22 @@ function addMessage(text,cls){const div=document.createElement("div");div.classN
 function busy(x){sendBtn.disabled=x;sendBtn.textContent=x?"Thinking":"Send";state.textContent=x?"Working...":"Ready"}
 
 async function loadModels(){try{const res=await fetch("/api/models");const data=await res.json();modelSelect.innerHTML='<option value="auto">auto</option>';for(const m of data.models){const o=document.createElement("option");o.value=m;o.textContent=m;modelSelect.appendChild(o)}}catch{modelSelect.innerHTML='<option value="auto">auto</option><option value="qwen2.5-coder:7b">qwen2.5-coder:7b</option>'}}
-async function loadProjects(){const res=await fetch("/projects");const data=await res.json();projectSelect.innerHTML="";for(const p of data.projects){const o=document.createElement("option");o.value=p;o.textContent=p;projectSelect.appendChild(o)}const fallback=data.default_project&&data.projects.includes(data.default_project)?data.default_project:data.projects[0];if(fallback)projectSelect.value=fallback;await loadFiles();if(fallback)await loadProjectSettings()}
+async function loadProjects(){const res=await fetch("/projects");const data=await res.json();projectSelect.innerHTML="";for(const p of data.projects){const o=document.createElement("option");o.value=p;o.textContent=p;projectSelect.appendChild(o)}const fallback=data.default_project&&data.projects.includes(data.default_project)?data.default_project:data.projects[0];if(fallback)projectSelect.value=fallback;await loadFiles();if(fallback){await loadProjectSettings();await loadProjectIndex()}}
 async function loadFiles(){if(!projectSelect.value){fileSelect.innerHTML="";return}const res=await fetch("/api/files?project="+encodeURIComponent(projectSelect.value));const data=await res.json();fileSelect.innerHTML="";for(const f of data.files){const o=document.createElement("option");o.value=f;o.textContent=f;fileSelect.appendChild(o)}}
-projectSelect.addEventListener("change",async()=>{await loadFiles();await loadProjectSettings()});
+projectSelect.addEventListener("change",async()=>{await loadFiles();await loadProjectSettings();await loadProjectIndex()});
+
+function formatBytes(size){if(size===null||size===undefined)return "";if(size<1024)return size+" B";if(size<1048576)return Math.round(size/1024)+" KB";return (size/1048576).toFixed(1)+" MB"}
+function renderProjectIndex(data){
+ const panel=document.getElementById("projectIndex");
+ if(data.error){panel.innerHTML='<div class="indexHint">'+data.text+'</div>';return}
+ const categories=Object.entries(data.categories||{}).map(([k,v])=>k+":"+v).join(" · ")||"no files";
+ const rows=(data.files||[]).slice(0,60).map(f=>'<div class="indexFile"><div class="indexPath">'+escapeHtml(f.path)+'</div><div class="indexTag">'+escapeHtml(f.category)+' '+escapeHtml(formatBytes(f.size))+'</div></div>').join("");
+ const truncated=data.truncated?' · limited to '+data.limit:"";
+ panel.innerHTML='<div class="indexMeta">'+data.count+' safe files'+truncated+'<br>'+escapeHtml(categories)+'</div>'+rows+'<div class="indexHint">Foundation for search-first AI context loading; no file contents are read by this panel.</div>';
+}
+async function loadProjectIndex(){if(!projectSelect.value)return;const res=await fetch("/api/project-index?project="+encodeURIComponent(projectSelect.value));const data=await res.json();renderProjectIndex(data)}
+const htmlEscapeMap = {"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"};
+function escapeHtml(text){return String(text).replace(/[&<>"']/g,c=>htmlEscapeMap[c]||c)}
 
 async function sendMessage(){
  const prompt=promptBox.value.trim(); if(!prompt)return;
@@ -1457,6 +1534,42 @@ def project_file_listing(project: str, limit: int = 300) -> list[str]:
     return sorted(files)[:limit]
 
 
+def project_index_manifest(project: str, limit: int = 500) -> dict[str, object]:
+    root = safe_project_path(project)
+    tracked_paths = git_tracked_project_files(project, root)
+    paths = tracked_paths if tracked_paths is not None else list(iter_project_files(root))
+    paths = sorted(paths, key=lambda p: str(p.relative_to(root)))
+    files = []
+    category_counts: dict[str, int] = {}
+    for path in paths[:limit]:
+        rel = path.relative_to(root)
+        try:
+            size = path.stat().st_size
+        except OSError:
+            size = None
+        category = project_file_category(rel)
+        category_counts[category] = category_counts.get(category, 0) + 1
+        suffix = rel.suffix.lower()
+        files.append(
+            {
+                "path": str(rel),
+                "extension": suffix,
+                "type": suffix.lstrip(".") if suffix else rel.name,
+                "size": size,
+                "category": category,
+            }
+        )
+    return {
+        "project": project,
+        "count": len(files),
+        "total": len(paths),
+        "limit": limit,
+        "truncated": len(paths) > len(files),
+        "categories": category_counts,
+        "files": files,
+    }
+
+
 def file_content_response(project: str, file: str) -> dict[str, str | int | bool]:
     target = safe_file_path(project, file)
     content, truncated = read_text_limited(target)
@@ -1508,6 +1621,15 @@ async def api_files(project: str = DEFAULT_PROJECT):
         return {"files": files}
     except Exception as e:
         return api_error("List files", e)
+
+
+@app.get("/api/project-index")
+async def api_project_index(project: str = DEFAULT_PROJECT, limit: int = 500):
+    try:
+        safe_limit = max(1, min(limit, 1000))
+        return await run_in_threadpool(project_index_manifest, project, safe_limit)
+    except Exception as e:
+        return api_error("Project index", e)
 
 
 @app.get("/api/file-content")
@@ -2454,4 +2576,3 @@ async def forcehub_agents_dashboard():
     return _fh_HTMLResponse(_fh_agent_dashboard_html())
 
 # === FORCEHUB_AGENTS_DASHBOARD_END ===
-
