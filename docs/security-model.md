@@ -4,7 +4,7 @@ ForceHub is designed for local-first operation. Public documentation and example
 
 ## Local-Only Default Posture
 
-ForceHub should bind to loopback by default. Local services should not be exposed to a LAN, VPN, tunnel, or public network unless the operator intentionally changes the configuration and understands the risk.
+ForceHub should bind to loopback by default. Local services should not be exposed beyond loopback through a LAN, local integration, or public network unless the operator intentionally changes the configuration and understands the risk.
 
 Default example binding:
 
@@ -30,7 +30,7 @@ Never commit:
 - Secrets, tokens, passwords, or API keys.
 - Real `.env` files.
 - Private IP addresses, hostnames, usernames, or machine-specific paths.
-- Tunnel configuration, VPN details, or provider-specific connection data.
+- Network exposure details, integration details, or service-specific connection data.
 - Screenshots, logs, diagnostics, or generated output containing sensitive context.
 
 ## Logs and Runtime Data
