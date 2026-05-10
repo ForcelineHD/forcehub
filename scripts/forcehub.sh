@@ -41,8 +41,31 @@ if [ -f "$PROJECT_DIR/.env" ]; then
 fi
 
 export FORCEHUB_AUTH_DISABLED="${FORCEHUB_AUTH_DISABLED:-0}"
-export FORCEHUB_USERNAME="${FORCEHUB_USERNAME:-admin}"
-export FORCEHUB_PASSWORD="${FORCEHUB_PASSWORD:-change-me-local-only}"
+
+validate_auth_config() {
+  if [ "$FORCEHUB_AUTH_DISABLED" = "1" ]; then
+    echo "WARNING: ForceHub authentication is disabled for this local instance."
+    return 0
+  fi
+
+  if [ -z "${FORCEHUB_USERNAME:-}" ]; then
+    echo "ERROR: FORCEHUB_USERNAME is required unless FORCEHUB_AUTH_DISABLED=1 is explicitly set." >&2
+    exit 1
+  fi
+
+  if [ -z "${FORCEHUB_PASSWORD:-}" ] && [ -z "${FORCEHUB_PASSWORD_FILE:-}" ]; then
+    echo "ERROR: FORCEHUB_PASSWORD or FORCEHUB_PASSWORD_FILE is required unless FORCEHUB_AUTH_DISABLED=1 is explicitly set." >&2
+    exit 1
+  fi
+
+  if [ "${FORCEHUB_USERNAME:-}" = "admin" ] && { [ "${FORCEHUB_PASSWORD:-}" = "forcehub" ] || [ "${FORCEHUB_PASSWORD:-}" = "change-me-local-only" ]; }; then
+    echo "ERROR: refusing to start with insecure default credentials." >&2
+    echo "Set FORCEHUB_USERNAME and FORCEHUB_PASSWORD or FORCEHUB_PASSWORD_FILE to private values." >&2
+    echo "For intentionally unauthenticated local testing, set FORCEHUB_AUTH_DISABLED=1." >&2
+    exit 1
+  fi
+}
+
 
 
 http_code() {
@@ -69,6 +92,8 @@ start() {
     http_alive || true
     exit 0
   fi
+
+  validate_auth_config
 
   echo "Starting ForceHub on http://$HOST:$PORT ..."
   nohup python -m uvicorn app.main:app --host "$HOST" --port "$PORT" --reload > "$LOG_FILE" 2>&1 &
@@ -123,6 +148,7 @@ status() {
 }
 
 restart() {
+  validate_auth_config
   stop
   sleep 1
   start

@@ -118,3 +118,9 @@ See [SECURITY.md](SECURITY.md) and [docs/security-model.md](docs/security-model.
 ## License
 
 This project is licensed under the MIT License. See [LICENSE](LICENSE).
+
+When using `scripts/forcehub.sh`, authentication is enabled by default and the
+launcher requires `FORCEHUB_USERNAME` plus either `FORCEHUB_PASSWORD` or
+`FORCEHUB_PASSWORD_FILE`. It refuses to start with known insecure default
+credential pairs. For intentionally unauthenticated local testing, set
+`FORCEHUB_AUTH_DISABLED=1` explicitly.
