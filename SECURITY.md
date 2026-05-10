@@ -12,7 +12,7 @@ Do not commit:
 
 - Secrets, tokens, passwords, or API keys.
 - Real `.env` files or machine-specific configuration.
-- Private IP addresses, internal hostnames, private file paths, or tunnel details.
+- Private IP addresses, internal hostnames, private file paths, or integration details.
 - Runtime data, logs, database files, screenshots, or sensitive diagnostics.
 - Notes that identify private infrastructure or operational environments.
 

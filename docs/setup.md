@@ -1,6 +1,6 @@
 # Setup
 
-This document describes a safe local setup flow for the public ForceHub foundation. It uses placeholders only and avoids private machine names, private addresses, local usernames, tunnel details, and environment-specific paths.
+This document describes a safe local setup flow for the public ForceHub foundation. It uses placeholders only and avoids private machine names, private addresses, local usernames, integration details, and environment-specific paths.
 
 ## Prerequisites
 
