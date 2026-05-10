@@ -146,11 +146,19 @@ SAFE_DEFAULT_MODEL = "qwen2.5-coder:3b"
 OLLAMA_FALLBACK_MODEL = "qwen2.5-coder:1.5b"
 NO_CONFIRMED_ISSUE = "No confirmed remaining issue found."
 TRUNCATION_WARNING_PREFIX = "FORCEHUB TRUNCATION WARNING:"
+GROUNDING_RULES = """Evidence-grounding rules:
+- Do not invent endpoints, files, routes, functions, classes, or behavior.
+- Mention exact route/function/file names only if they are visible in the provided context.
+- If something is not visible in the current context, say "not visible from current context".
+- Distinguish metadata-only project indexes from file-content reading.
+- Prefer concrete evidence from selected files, project context, or explicit user-provided text.
+"""
 CONFIRMED_AUDIT_RULES = f"""Confirmed-only audit rules:
 - Only confirmed issues.
 - No generic best-practice lists.
 - No style, documentation, formatting, or comment suggestions.
 - Must cite exact function/location/evidence for every finding.
+- Include an "Evidence used" section listing the exact visible files, routes, functions, or line references used.
 - Do not infer missing context from framework conventions or assumptions.
 - If no confirmed issue exists, output exactly:
 {NO_CONFIRMED_ISSUE}
@@ -944,8 +952,8 @@ class OllamaTimeoutError(RuntimeError):
 def build_prompt(user_prompt: str, mode: str, project: str, project_mode: bool) -> str:
     system = {
         "normal": "You are ForceHub AI. Answer clearly and practically.",
-        "code": "You are ForceHub AI coding assistant. Give code-first, practical answers.",
-        "cpp": "You are ForceHub AI C++ assistant. Focus on modern C++20, build systems, compile errors, performance, memory safety, RAII, undefined behavior, headers, CMake, and practical fixes.",
+        "code": "You are ForceHub AI coding assistant. Give code-first, practical answers grounded in visible code evidence.",
+        "cpp": "You are ForceHub AI C++ assistant. Focus on modern C++20, build systems, compile errors, performance, memory safety, RAII, undefined behavior, headers, CMake, and practical fixes grounded in visible code evidence.",
         "short": "Answer briefly and directly. No padding.",
         "explain": "Explain step by step, but avoid unnecessary basics.",
     }.get(mode, "You are ForceHub AI.")
@@ -955,6 +963,12 @@ def build_prompt(user_prompt: str, mode: str, project: str, project_mode: bool) 
     cached_summary = load_cache().get(project, {}).get("summary", "")
 
     return f"""{system}
+
+{GROUNDING_RULES}
+
+Project context note:
+- The Project Context panel/index is metadata-only: paths, extensions, sizes, and categories.
+- Full file content is available only when explicitly included below as project context, file content, selected text, or user-provided text.
 
 Cached project summary:
 {cached_summary}
@@ -1057,6 +1071,8 @@ Review scope: {scope}
 
 Task:
 {task}
+
+{GROUNDING_RULES}
 
 {CONFIRMED_AUDIT_RULES}
 
@@ -1356,7 +1372,7 @@ button:disabled{background:#3a3f50;cursor:wait}.secondary{background:#2a3040;wid
 <label>Project Context</label>
 <button class="action" onclick="loadProjectIndex()">Refresh index</button>
 <div id="projectIndex" class="indexPanel">
-<div class="indexHint">Project index loads safe metadata only.</div>
+<div class="indexHint">Project index loads metadata only: file paths, types, sizes, and categories. It is not full-code evidence.</div>
 </div>
 </div>
 
@@ -1408,7 +1424,7 @@ function renderProjectIndex(data){
  const categories=Object.entries(data.categories||{}).map(([k,v])=>k+":"+v).join(" · ")||"no files";
  const rows=(data.files||[]).slice(0,60).map(f=>'<div class="indexFile"><div class="indexPath">'+escapeHtml(f.path)+'</div><div class="indexTag">'+escapeHtml(f.category)+' '+escapeHtml(formatBytes(f.size))+'</div></div>').join("");
  const truncated=data.truncated?' · limited to '+data.limit:"";
- panel.innerHTML='<div class="indexMeta">'+data.count+' safe files'+truncated+'<br>'+escapeHtml(categories)+'</div>'+rows+'<div class="indexHint">Foundation for search-first AI context loading; no file contents are read by this panel.</div>';
+ panel.innerHTML='<div class="indexMeta">'+data.count+' safe files'+truncated+'<br>'+escapeHtml(categories)+'</div>'+rows+'<div class="indexHint">Metadata-only foundation for project context; use file content or selected project context for code evidence.</div>';
 }
 async function loadProjectIndex(){if(!projectSelect.value)return;const res=await fetch("/api/project-index?project="+encodeURIComponent(projectSelect.value));const data=await res.json();renderProjectIndex(data)}
 const htmlEscapeMap = {"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"};
@@ -1960,7 +1976,16 @@ def project_action(req: ProjectActionRequest):
         if req.action == "bugs":
             final_prompt = build_confirmed_audit_prompt("project", prompts[req.action], "Project context", context)
         else:
-            final_prompt = f"You are ForceHub AI project reviewer.\n\nTask:\n{prompts[req.action]}\n\nProject context:\n{context}\n"
+            final_prompt = f"""You are ForceHub AI project reviewer.
+
+Task:
+{prompts[req.action]}
+
+{GROUNDING_RULES}
+
+Project context:
+{context}
+"""
         answer, used_model, elapsed = ask_with_fallback(final_prompt, req.model)
         if req.action == "bugs":
             answer = clean_confirmed_audit_answer(answer)
@@ -2001,7 +2026,16 @@ def file_action(req: FileReviewRequest):
             answer, used_model, elapsed = review_file_in_chunks(file_path, root, prompts[req.action], req.model)
         else:
             content = read_file_safe(file_path, root)
-            final_prompt = f"You are ForceHub AI file reviewer.\n\nTask:\n{prompts[req.action]}\n\nFile content:\n{content}\n"
+            final_prompt = f"""You are ForceHub AI file reviewer.
+
+Task:
+{prompts[req.action]}
+
+{GROUNDING_RULES}
+
+File content:
+{content}
+"""
             answer, used_model, elapsed = ask_with_fallback(final_prompt, req.model)
             answer = prepend_truncation_warnings(answer, content)
         LAST_DEBUG.update({"model": used_model, "elapsed": elapsed, "action": f"file_{req.action}"})

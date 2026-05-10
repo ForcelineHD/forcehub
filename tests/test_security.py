@@ -111,6 +111,7 @@ def test_project_index_returns_safe_metadata_without_file_contents(monkeypatch, 
     assert data["categories"]["frontend"] == 1
     assert data["categories"]["test"] == 1
     assert all(set(item) == {"path", "extension", "type", "size", "category"} for item in data["files"])
+    assert all("content" not in item and "summary" not in item for item in data["files"])
     assert "print('ok')" not in response.text
     assert "not returned" not in response.text
 
@@ -345,6 +346,11 @@ def test_chat_endpoint_uses_mocked_ollama_request(monkeypatch, tmp_path):
     assert response.json()["text"] == "mocked response"
     assert calls[0][0] == main.OLLAMA_GENERATE_URL
     assert calls[0][1]["timeout"] == main.OLLAMA_TIMEOUT_SECONDS
+    prompt = calls[0][1]["json"]["prompt"]
+    assert "Do not invent endpoints, files, routes, functions, classes, or behavior." in prompt
+    assert 'say "not visible from current context"' in prompt
+    assert "Distinguish metadata-only project indexes from file-content reading." in prompt
+    assert "The Project Context panel/index is metadata-only" in prompt
 
 
 def test_chat_stream_uses_configured_ollama_timeout(monkeypatch, tmp_path):
@@ -579,6 +585,9 @@ def test_bugs_and_review_prompts_are_confirmed_only(monkeypatch, tmp_path):
         assert "No generic best-practice lists." in prompt
         assert "No style, documentation, formatting, or comment suggestions." in prompt
         assert "Must cite exact function/location/evidence" in prompt
+        assert 'Include an "Evidence used" section' in prompt
+        assert "Do not invent endpoints, files, routes, functions, classes, or behavior." in prompt
+        assert "Distinguish metadata-only project indexes from file-content reading." in prompt
         assert f"If no confirmed issue exists, output exactly:\n{main.NO_CONFIRMED_ISSUE}" in prompt
 
 
