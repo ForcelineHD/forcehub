@@ -7,302 +7,572 @@
         MinWidth="1400"
         MinHeight="860"
         WindowStartupLocation="CenterScreen"
-        Background="{StaticResource Bg}">
+        Background="#030914">
 
-    <Grid Background="{StaticResource Bg}">
+    <Window.Resources>
+        <SolidColorBrush x:Key="CyberBg" Color="#030914"/>
+        <SolidColorBrush x:Key="CyberPanel" Color="#07111F"/>
+        <SolidColorBrush x:Key="CyberCardBg" Color="#0B1728"/>
+        <SolidColorBrush x:Key="CyberCardAlt" Color="#0E1C30"/>
+        <SolidColorBrush x:Key="CyberBorder" Color="#16466B"/>
+        <SolidColorBrush x:Key="CyberAccent" Color="#20C7FF"/>
+        <SolidColorBrush x:Key="CyberBlue" Color="#3B82F6"/>
+        <SolidColorBrush x:Key="CyberText" Color="#EAF6FF"/>
+        <SolidColorBrush x:Key="CyberDim" Color="#8FB3D9"/>
+        <SolidColorBrush x:Key="CyberSuccess" Color="#22C55E"/>
+        <SolidColorBrush x:Key="CyberWarning" Color="#F97316"/>
+        <SolidColorBrush x:Key="CyberDanger" Color="#EF4444"/>
+
+        <Style TargetType="{x:Type TextBlock}">
+            <Setter Property="Foreground" Value="{StaticResource CyberText}"/>
+            <Setter Property="TextOptions.TextFormattingMode" Value="Display"/>
+            <Setter Property="TextOptions.TextRenderingMode" Value="ClearType"/>
+        </Style>
+
+        <Style x:Key="SectionTitle" TargetType="{x:Type TextBlock}">
+            <Setter Property="Foreground" Value="{StaticResource CyberDim}"/>
+            <Setter Property="FontSize" Value="12"/>
+            <Setter Property="FontWeight" Value="SemiBold"/>
+        </Style>
+
+        <Style x:Key="MetricValue" TargetType="{x:Type TextBlock}">
+            <Setter Property="Foreground" Value="{StaticResource CyberText}"/>
+            <Setter Property="FontSize" Value="34"/>
+            <Setter Property="FontWeight" Value="Bold"/>
+        </Style>
+
+        <Style x:Key="CyberCard" TargetType="{x:Type Border}">
+            <Setter Property="Background" Value="{StaticResource CyberCardBg}"/>
+            <Setter Property="BorderBrush" Value="{StaticResource CyberBorder}"/>
+            <Setter Property="BorderThickness" Value="1"/>
+            <Setter Property="CornerRadius" Value="16"/>
+            <Setter Property="Padding" Value="16"/>
+            <Setter Property="SnapsToDevicePixels" Value="True"/>
+            <Setter Property="Effect">
+                <Setter.Value>
+                    <DropShadowEffect Color="#00243A" BlurRadius="18" ShadowDepth="0" Opacity="0.48"/>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
+        <Style x:Key="CyberMetricCard" TargetType="{x:Type Border}" BasedOn="{StaticResource CyberCard}">
+            <Setter Property="Padding" Value="16"/>
+            <Setter Property="MinHeight" Value="150"/>
+            <Setter Property="HorizontalAlignment" Value="Stretch"/>
+            <Setter Property="VerticalAlignment" Value="Stretch"/>
+        </Style>
+
+        <Style x:Key="CyberButton" TargetType="{x:Type Button}">
+            <Setter Property="Height" Value="38"/>
+            <Setter Property="Margin" Value="0,0,0,10"/>
+            <Setter Property="Foreground" Value="{StaticResource CyberText}"/>
+            <Setter Property="Background" Value="#0D2A45"/>
+            <Setter Property="BorderBrush" Value="{StaticResource CyberAccent}"/>
+            <Setter Property="BorderThickness" Value="1"/>
+            <Setter Property="FontSize" Value="13"/>
+            <Setter Property="FontWeight" Value="SemiBold"/>
+            <Setter Property="Cursor" Value="Hand"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="{x:Type Button}">
+                        <Border x:Name="Bd"
+                                Background="{TemplateBinding Background}"
+                                BorderBrush="{TemplateBinding BorderBrush}"
+                                BorderThickness="{TemplateBinding BorderThickness}"
+                                CornerRadius="11">
+                            <ContentPresenter HorizontalAlignment="Center"
+                                              VerticalAlignment="Center"/>
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter TargetName="Bd" Property="Background" Value="#123A5E"/>
+                            </Trigger>
+                            <Trigger Property="IsPressed" Value="True">
+                                <Setter TargetName="Bd" Property="Opacity" Value="0.82"/>
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
+        <Style x:Key="CyberDangerButton" TargetType="{x:Type Button}" BasedOn="{StaticResource CyberButton}">
+            <Setter Property="Background" Value="#4A1B16"/>
+            <Setter Property="BorderBrush" Value="{StaticResource CyberWarning}"/>
+        </Style>
+
+        <Style x:Key="CyberInput" TargetType="{x:Type TextBox}">
+            <Setter Property="Height" Value="36"/>
+            <Setter Property="Background" Value="#071426"/>
+            <Setter Property="Foreground" Value="{StaticResource CyberText}"/>
+            <Setter Property="BorderBrush" Value="#1E5B82"/>
+            <Setter Property="CaretBrush" Value="{StaticResource CyberAccent}"/>
+            <Setter Property="SelectionBrush" Value="#0EA5E9"/>
+            <Setter Property="BorderThickness" Value="1"/>
+            <Setter Property="Padding" Value="10,0,10,0"/>
+            <Setter Property="VerticalContentAlignment" Value="Center"/>
+            <Setter Property="FontSize" Value="13"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="{x:Type TextBox}">
+                        <Border x:Name="Bd"
+                                Background="{TemplateBinding Background}"
+                                BorderBrush="{TemplateBinding BorderBrush}"
+                                BorderThickness="{TemplateBinding BorderThickness}"
+                                CornerRadius="10">
+                            <ScrollViewer x:Name="PART_ContentHost"
+                                          Margin="{TemplateBinding Padding}"
+                                          VerticalAlignment="{TemplateBinding VerticalContentAlignment}"/>
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsKeyboardFocused" Value="True">
+                                <Setter TargetName="Bd" Property="BorderBrush" Value="{StaticResource CyberAccent}"/>
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
+        <Style x:Key="CyberEditor" TargetType="{x:Type TextBox}">
+            <Setter Property="Background" Value="#071426"/>
+            <Setter Property="Foreground" Value="{StaticResource CyberText}"/>
+            <Setter Property="BorderBrush" Value="#1E5B82"/>
+            <Setter Property="CaretBrush" Value="{StaticResource CyberAccent}"/>
+            <Setter Property="SelectionBrush" Value="#0EA5E9"/>
+            <Setter Property="BorderThickness" Value="1"/>
+            <Setter Property="Padding" Value="12"/>
+            <Setter Property="VerticalContentAlignment" Value="Top"/>
+            <Setter Property="FontSize" Value="12"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="{x:Type TextBox}">
+                        <Border x:Name="Bd"
+                                Background="{TemplateBinding Background}"
+                                BorderBrush="{TemplateBinding BorderBrush}"
+                                BorderThickness="{TemplateBinding BorderThickness}"
+                                CornerRadius="10">
+                            <ScrollViewer x:Name="PART_ContentHost"
+                                          Margin="{TemplateBinding Padding}"/>
+                        </Border>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
+        <Style x:Key="CyberPasswordInput" TargetType="{x:Type PasswordBox}">
+            <Setter Property="Height" Value="36"/>
+            <Setter Property="Background" Value="#071426"/>
+            <Setter Property="Foreground" Value="{StaticResource CyberText}"/>
+            <Setter Property="BorderBrush" Value="#1E5B82"/>
+            <Setter Property="CaretBrush" Value="{StaticResource CyberAccent}"/>
+            <Setter Property="SelectionBrush" Value="#0EA5E9"/>
+            <Setter Property="BorderThickness" Value="1"/>
+            <Setter Property="Padding" Value="10,0,10,0"/>
+            <Setter Property="VerticalContentAlignment" Value="Center"/>
+            <Setter Property="FontSize" Value="13"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="{x:Type PasswordBox}">
+                        <Border x:Name="Bd"
+                                Background="{TemplateBinding Background}"
+                                BorderBrush="{TemplateBinding BorderBrush}"
+                                BorderThickness="{TemplateBinding BorderThickness}"
+                                CornerRadius="10">
+                            <ScrollViewer x:Name="PART_ContentHost"
+                                          Margin="{TemplateBinding Padding}"
+                                          VerticalAlignment="{TemplateBinding VerticalContentAlignment}"/>
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsKeyboardFocused" Value="True">
+                                <Setter TargetName="Bd" Property="BorderBrush" Value="{StaticResource CyberAccent}"/>
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
+        <Style TargetType="{x:Type DataGrid}">
+            <Setter Property="Background" Value="#07111F"/>
+            <Setter Property="Foreground" Value="{StaticResource CyberText}"/>
+            <Setter Property="BorderThickness" Value="0"/>
+            <Setter Property="GridLinesVisibility" Value="Horizontal"/>
+            <Setter Property="HorizontalGridLinesBrush" Value="#142B46"/>
+            <Setter Property="RowBackground" Value="#07111F"/>
+            <Setter Property="AlternatingRowBackground" Value="#0B1728"/>
+            <Setter Property="HeadersVisibility" Value="Column"/>
+            <Setter Property="CanUserAddRows" Value="False"/>
+            <Setter Property="AutoGenerateColumns" Value="False"/>
+            <Setter Property="IsReadOnly" Value="True"/>
+            <Setter Property="SelectionMode" Value="Single"/>
+            <Setter Property="SelectionUnit" Value="FullRow"/>
+            <Setter Property="RowHeaderWidth" Value="0"/>
+            <Setter Property="FontSize" Value="13"/>
+            <Setter Property="RowHeight" Value="34"/>
+        </Style>
+
+        <Style TargetType="{x:Type DataGridColumnHeader}">
+            <Setter Property="Background" Value="#0D2A45"/>
+            <Setter Property="Foreground" Value="{StaticResource CyberDim}"/>
+            <Setter Property="FontWeight" Value="SemiBold"/>
+            <Setter Property="FontSize" Value="12"/>
+            <Setter Property="Padding" Value="10,8"/>
+            <Setter Property="BorderBrush" Value="#16466B"/>
+            <Setter Property="BorderThickness" Value="0,0,0,1"/>
+        </Style>
+
+        <Style TargetType="{x:Type DataGridCell}">
+            <Setter Property="Foreground" Value="{StaticResource CyberText}"/>
+            <Setter Property="Background" Value="Transparent"/>
+            <Setter Property="Padding" Value="10,6"/>
+            <Setter Property="BorderThickness" Value="0"/>
+            <Style.Triggers>
+                <Trigger Property="IsSelected" Value="True">
+                    <Setter Property="Background" Value="#0E7490"/>
+                    <Setter Property="Foreground" Value="#FFFFFF"/>
+                </Trigger>
+            </Style.Triggers>
+        </Style>
+
+        <Style x:Key="CyberTabControl" TargetType="{x:Type TabControl}">
+            <Setter Property="Background" Value="Transparent"/>
+            <Setter Property="BorderThickness" Value="0"/>
+            <Setter Property="Padding" Value="0"/>
+        </Style>
+
+        <Style x:Key="CyberTabItem" TargetType="{x:Type TabItem}">
+            <Setter Property="Width" Value="118"/>
+            <Setter Property="Height" Value="38"/>
+            <Setter Property="Margin" Value="0,0,8,0"/>
+            <Setter Property="Padding" Value="14,8"/>
+            <Setter Property="Foreground" Value="{StaticResource CyberDim}"/>
+            <Setter Property="Background" Value="#071426"/>
+            <Setter Property="BorderBrush" Value="{StaticResource CyberBorder}"/>
+            <Setter Property="FontSize" Value="13"/>
+            <Setter Property="FontWeight" Value="SemiBold"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="{x:Type TabItem}">
+                        <Border x:Name="Bd"
+                                Background="{TemplateBinding Background}"
+                                BorderBrush="{TemplateBinding BorderBrush}"
+                                BorderThickness="1"
+                                CornerRadius="12"
+                                Padding="{TemplateBinding Padding}">
+                            <ContentPresenter ContentSource="Header"
+                                              HorizontalAlignment="Center"
+                                              VerticalAlignment="Center"/>
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsSelected" Value="True">
+                                <Setter TargetName="Bd" Property="Background" Value="#0D2A45"/>
+                                <Setter TargetName="Bd" Property="BorderBrush" Value="{StaticResource CyberAccent}"/>
+                                <Setter Property="Foreground" Value="{StaticResource CyberText}"/>
+                            </Trigger>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter TargetName="Bd" Property="Background" Value="#102A43"/>
+                                <Setter Property="Foreground" Value="{StaticResource CyberText}"/>
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+    </Window.Resources>
+
+    <Grid Background="{StaticResource CyberBg}">
         <Grid.ColumnDefinitions>
-            <ColumnDefinition Width="260"/>
+            <ColumnDefinition Width="220"/>
             <ColumnDefinition Width="*"/>
-            <ColumnDefinition Width="360"/>
+            <ColumnDefinition Width="330"/>
         </Grid.ColumnDefinitions>
 
-        <!-- SIDEBAR -->
-        <Border Grid.Column="0"
-                Background="{StaticResource SidebarBg}"
-                BorderBrush="{StaticResource Border}"
-                BorderThickness="0,0,1,0">
-            <DockPanel Margin="20">
-
+        <Border Grid.Column="0" BorderBrush="#12496A" BorderThickness="0,0,1,0">
+            <Border.Background>
+                <LinearGradientBrush StartPoint="0,0" EndPoint="1,1">
+                    <GradientStop Color="#030914" Offset="0"/>
+                    <GradientStop Color="#07111F" Offset="0.55"/>
+                    <GradientStop Color="#0B3A52" Offset="1"/>
+                </LinearGradientBrush>
+            </Border.Background>
+            <DockPanel Margin="16">
                 <StackPanel DockPanel.Dock="Top">
-                    <TextBlock Text="ForceHub"
-                               FontSize="29"
-                               FontWeight="Bold"
-                               Foreground="{StaticResource TextMain}"/>
+                    <TextBlock Text="ForceHub" FontSize="28" FontWeight="Bold" Foreground="#FFFFFF"/>
+                    <TextBlock Text="Native Monitor V2" FontSize="12" Foreground="{StaticResource CyberDim}" Margin="0,4,0,22"/>
 
-                    <TextBlock Text="Native Monitor V2"
-                               FontSize="13"
-                               Foreground="{StaticResource TextSoft}"
-                               Margin="0,3,0,26"/>
+                    <TextBlock Text="Server / Tunnel / Agent" Style="{StaticResource SectionTitle}" Margin="0,0,0,8"/>
+                    <Button Content="Start Server" Click="StartServer_Click" Style="{StaticResource CyberButton}"/>
+                    <Button Content="Start Local Integration" Click="StartLocalIntegration_Click" Style="{StaticResource CyberButton}"/>
+                    <Button Content="Start Agent Watch" Click="StartAgentWatch_Click" Style="{StaticResource CyberButton}" Background="#064E3B" BorderBrush="{StaticResource CyberSuccess}"/>
 
-                    <Button Content="Start Server" Click="StartServer_Click" Background="{StaticResource Accent}" BorderBrush="{StaticResource Accent}"/>
-                    <Button Content="Start Local Integration" Click="StartLocalIntegration_Click" Background="{StaticResource Accent}" BorderBrush="{StaticResource Accent}"/>
-                    <Button Content="Start Agent Watch" Click="StartAgentWatch_Click" Background="{StaticResource Green}" BorderBrush="{StaticResource Green}"/>
+                    <TextBlock Text="Refresh" Style="{StaticResource SectionTitle}" Margin="0,8,0,8"/>
+                    <Button Content="Refresh Now" Click="Refresh_Click" Style="{StaticResource CyberButton}" Background="#071426"/>
+                    <Button Content="Start Auto Refresh" Click="StartAuto_Click" Style="{StaticResource CyberButton}" Background="#071426"/>
+                    <Button Content="Stop Auto Refresh" Click="StopAuto_Click" Style="{StaticResource CyberButton}" Background="#071426"/>
 
-                    <Separator/>
+                    <TextBlock Text="Stop / Kill" Style="{StaticResource SectionTitle}" Margin="0,8,0,8"/>
+                    <Button Content="Stop Agent Watch" Click="StopAgentWatch_Click" Style="{StaticResource CyberDangerButton}"/>
+                    <Button Content="Stop Local Integration" Click="StopLocalIntegration_Click" Style="{StaticResource CyberDangerButton}"/>
+                    <Button Content="Stop Server" Click="StopServer_Click" Style="{StaticResource CyberDangerButton}"/>
+                    <Button Content="Kill All" Click="KillAll_Click" Style="{StaticResource CyberDangerButton}" Background="#7F1D1D" BorderBrush="{StaticResource CyberDanger}"/>
 
-                    <Button Content="Refresh Now" Click="Refresh_Click"/>
-                    <Button Content="Start Auto Refresh" Click="StartAuto_Click"/>
-                    <Button Content="Stop Auto Refresh" Click="StopAuto_Click"/>
-
-                    <Separator/>
-
-                    <Button Content="Stop Agent Watch" Click="StopAgentWatch_Click" Background="{StaticResource Orange}" BorderBrush="{StaticResource Orange}"/>
-                    <Button Content="Stop Local Integration" Click="StopLocalIntegration_Click" Background="{StaticResource Orange}" BorderBrush="{StaticResource Orange}"/>
-                    <Button Content="Stop Server" Click="StopServer_Click" Background="{StaticResource Orange}" BorderBrush="{StaticResource Orange}"/>
-                    <Button Content="Kill All" Click="KillAll_Click" Background="{StaticResource Red}" BorderBrush="{StaticResource Red}"/>
-
-                    <Separator/>
-
-                    <Button Content="Open Web Dashboard" Click="OpenDashboard_Click"/>
-                    <Button Content="Open Agent Folder" Click="OpenFolder_Click"/>
+                    <TextBlock Text="Open Tools" Style="{StaticResource SectionTitle}" Margin="0,8,0,8"/>
+                    <Button Content="Open Web Dashboard" Click="OpenDashboard_Click" Style="{StaticResource CyberButton}" Background="#0B1728"/>
+                    <Button Content="Open Agent Folder" Click="OpenFolder_Click" Style="{StaticResource CyberButton}" Background="#0B1728"/>
                 </StackPanel>
 
-                <StackPanel DockPanel.Dock="Bottom">
-                    <TextBlock Text="Status"
-                               Foreground="{StaticResource TextDim}"
-                               FontSize="12"
-                               FontWeight="SemiBold"/>
-
-                    <TextBlock x:Name="StatusText"
-                               Text="Ready."
-                               Foreground="{StaticResource TextSoft}"
-                               FontSize="12"
-                               Margin="0,5,0,0"
-                               TextWrapping="Wrap"/>
-                </StackPanel>
+                <Border DockPanel.Dock="Bottom" Background="#071426" BorderBrush="{StaticResource CyberBorder}" BorderThickness="1" CornerRadius="14" Padding="12">
+                    <StackPanel>
+                        <TextBlock Text="STATUS BUS" Style="{StaticResource SectionTitle}"/>
+                        <TextBlock x:Name="StatusText" Text="Ready." Foreground="{StaticResource CyberText}" FontSize="12" Margin="0,6,0,0" TextWrapping="Wrap"/>
+                    </StackPanel>
+                </Border>
             </DockPanel>
         </Border>
 
-        <!-- CENTER -->
-        <Grid Grid.Column="1" Margin="20">
+        <Grid Grid.Column="1" Margin="18">
             <Grid.RowDefinitions>
-                <RowDefinition Height="128"/>
-                <RowDefinition Height="128"/>
+                <RowDefinition Height="120"/>
+                <RowDefinition Height="170"/>
                 <RowDefinition Height="*"/>
-                <RowDefinition Height="294"/>
+                <RowDefinition Height="260"/>
             </Grid.RowDefinitions>
 
-            <!-- HEADER -->
-            <Border Grid.Row="0"
-                    Style="{StaticResource CardBorder}"
-                    Padding="18">
+            <Border Grid.Row="0" Style="{StaticResource CyberCard}">
                 <Grid>
                     <Grid.ColumnDefinitions>
                         <ColumnDefinition Width="*"/>
-                        <ColumnDefinition Width="390"/>
+                        <ColumnDefinition Width="460"/>
                     </Grid.ColumnDefinitions>
-
-                    <StackPanel Grid.Column="0" VerticalAlignment="Center">
-                        <TextBlock Text="ForceHub Agents"
-                                   FontSize="25"
-                                   FontWeight="Bold"
-                                   Foreground="{StaticResource TextMain}"/>
-
-                        <TextBlock x:Name="HeaderSubtitle"
-                                   Text="API: http://127.0.0.1:18001/api/agents"
-                                   Foreground="{StaticResource TextSoft}"
-                                   FontSize="12"
-                                   Margin="0,7,0,0"
-                                   TextTrimming="CharacterEllipsis"/>
+                    <StackPanel VerticalAlignment="Center">
+                        <TextBlock Text="ForceHub Native Monitor" FontSize="28" FontWeight="Bold"/>
+                        <TextBlock x:Name="HeaderSubtitle" Text="API: http://127.0.0.1:18001/api/agents" Foreground="{StaticResource CyberDim}" FontSize="12" Margin="0,8,0,0" TextTrimming="CharacterEllipsis"/>
+                        <Border Background="#071426" BorderBrush="{StaticResource CyberAccent}" BorderThickness="1" CornerRadius="12" Padding="10,4" HorizontalAlignment="Left" Margin="0,12,0,0">
+                            <TextBlock x:Name="ApiMetric" Text="--" Foreground="{StaticResource CyberAccent}" FontWeight="Bold"/>
+                        </Border>
                     </StackPanel>
-
                     <Grid Grid.Column="1" VerticalAlignment="Center">
+                        <Grid.RowDefinitions>
+                            <RowDefinition Height="Auto"/>
+                            <RowDefinition Height="8"/>
+                            <RowDefinition Height="Auto"/>
+                        </Grid.RowDefinitions>
                         <Grid.ColumnDefinitions>
                             <ColumnDefinition Width="*"/>
-                            <ColumnDefinition Width="110"/>
+                            <ColumnDefinition Width="118"/>
                         </Grid.ColumnDefinitions>
-
-                        <TextBox x:Name="SearchBox"
-                                 Grid.Column="0"
-                                 Height="38"
-                                 Margin="0,0,12,0"
-                                 TextChanged="SearchBox_TextChanged"/>
-
-                        <Button Grid.Column="1"
-                                Content="Refresh"
-                                Height="38"
-                                Margin="0"
-                                Click="Refresh_Click"
-                                Background="{StaticResource Accent}"
-                                BorderBrush="{StaticResource Accent}"/>
+                        <TextBlock Text="Agent Token" Style="{StaticResource SectionTitle}" Grid.ColumnSpan="2"/>
+                        <PasswordBox x:Name="AgentTokenBox" Style="{StaticResource CyberPasswordInput}" Grid.Row="2" Grid.Column="0" Margin="0,0,12,0"/>
+                        <Button Grid.Row="2" Grid.Column="1" Content="Refresh" Click="Refresh_Click" Style="{StaticResource CyberButton}" Margin="0"/>
                     </Grid>
                 </Grid>
             </Border>
 
-            <!-- METRIC STRIP -->
-            <Border Grid.Row="1"
-                    Style="{StaticResource CardBorder}"
-                    Padding="14"
-                    Margin="0,14,0,0">
-                <Grid>
-                    <Grid.ColumnDefinitions>
-                        <ColumnDefinition Width="130"/>
-                        <ColumnDefinition Width="170"/>
-                        <ColumnDefinition Width="*"/>
-                        <ColumnDefinition Width="*"/>
-                        <ColumnDefinition Width="150"/>
-                    </Grid.ColumnDefinitions>
+            <Grid Grid.Row="1" Margin="0,14,0,0">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="1*"/>
+                    <ColumnDefinition Width="1*"/>
+                    <ColumnDefinition Width="1*"/>
+                    <ColumnDefinition Width="1*"/>
+                    <ColumnDefinition Width="1.15*"/>
+                </Grid.ColumnDefinitions>
 
-                    <StackPanel Grid.Column="0" VerticalAlignment="Center">
+                <Border Grid.Column="0" Style="{StaticResource CyberMetricCard}" Margin="0,0,10,0">
+                    <Grid>
+                        <Grid.RowDefinitions>
+                            <RowDefinition Height="Auto"/>
+                            <RowDefinition Height="*"/>
+                            <RowDefinition Height="Auto"/>
+                        </Grid.RowDefinitions>
                         <TextBlock Text="Agents" Style="{StaticResource SectionTitle}"/>
-                        <TextBlock x:Name="AgentsMetric"
-                                   Text="--"
-                                   FontSize="22"
-                                   FontWeight="Bold"
-                                   Foreground="{StaticResource TextMain}"
-                                   Margin="0,6,0,0"/>
-                    </StackPanel>
-
-                    <StackPanel Grid.Column="1" VerticalAlignment="Center">
-                        <TextBlock Text="Live" Style="{StaticResource SectionTitle}"/>
-                        <TextBlock x:Name="LiveMetric"
-                                   Text="--"
-                                   FontSize="22"
-                                   FontWeight="Bold"
-                                   Foreground="{StaticResource Green}"
-                                   Margin="0,6,0,0"/>
-                    </StackPanel>
-
-                    <!-- CPU LIVE GRAPH -->
-                    <Grid Grid.Column="2" Margin="8,0,12,0">
-                        <Grid.RowDefinitions>
-                            <RowDefinition Height="30"/>
-                            <RowDefinition Height="68"/>
-                        </Grid.RowDefinitions>
-
-                        <DockPanel Grid.Row="0">
-                            <TextBlock Text="CPU Live" Style="{StaticResource SectionTitle}" DockPanel.Dock="Left"/>
-                            <TextBlock x:Name="CpuMetric"
-                                       Text="--"
-                                       FontSize="21"
-                                       FontWeight="Bold"
-                                       Foreground="{StaticResource TextMain}"
-                                       HorizontalAlignment="Right"/>
-                        </DockPanel>
-
-                        <Border Grid.Row="1"
-                                CornerRadius="10"
-                                BorderBrush="{StaticResource Border}"
-                                BorderThickness="1"
-                                Background="#07101F"
-                                Padding="8">
-                            <Canvas x:Name="CpuGraphCanvas"
-                                    ClipToBounds="True"
-                                    Background="Transparent">
-                                <Polyline x:Name="CpuGraph"
-                                          Stroke="#3B82F6"
-                                          StrokeThickness="2.5"
-                                          StrokeLineJoin="Round"
-                                          StrokeStartLineCap="Round"
-                                          StrokeEndLineCap="Round"/>
-                            </Canvas>
-                        </Border>
+                        <TextBlock x:Name="AgentsMetric" Grid.Row="1" Text="--" Style="{StaticResource MetricValue}" FontSize="46" VerticalAlignment="Center"/>
+                        <TextBlock Grid.Row="2" Text="registered endpoints" Foreground="{StaticResource CyberDim}" FontSize="12"/>
+                        <Ellipse Width="34" Height="34" Fill="#0D2A45" Stroke="{StaticResource CyberAccent}" HorizontalAlignment="Right" VerticalAlignment="Top"/>
                     </Grid>
+                </Border>
 
-                    <!-- MEMORY LIVE GRAPH -->
-                    <Grid Grid.Column="3" Margin="8,0,12,0">
+                <Border Grid.Column="1" Style="{StaticResource CyberMetricCard}" Margin="0,0,10,0">
+                    <Grid>
                         <Grid.RowDefinitions>
-                            <RowDefinition Height="30"/>
-                            <RowDefinition Height="68"/>
+                            <RowDefinition Height="Auto"/>
+                            <RowDefinition Height="*"/>
+                            <RowDefinition Height="Auto"/>
                         </Grid.RowDefinitions>
-
-                        <DockPanel Grid.Row="0">
-                            <TextBlock Text="Memory Live" Style="{StaticResource SectionTitle}" DockPanel.Dock="Left"/>
-                            <TextBlock x:Name="MemoryMetric"
-                                       Text="--"
-                                       FontSize="21"
-                                       FontWeight="Bold"
-                                       Foreground="{StaticResource TextMain}"
-                                       HorizontalAlignment="Right"/>
-                        </DockPanel>
-
-                        <Border Grid.Row="1"
-                                CornerRadius="10"
-                                BorderBrush="{StaticResource Border}"
-                                BorderThickness="1"
-                                Background="#07101F"
-                                Padding="8">
-                            <Canvas x:Name="MemoryGraphCanvas"
-                                    ClipToBounds="True"
-                                    Background="Transparent">
-                                <Polyline x:Name="MemoryGraph"
-                                          Stroke="#22C55E"
-                                          StrokeThickness="2.5"
-                                          StrokeLineJoin="Round"
-                                          StrokeStartLineCap="Round"
-                                          StrokeEndLineCap="Round"/>
-                            </Canvas>
-                        </Border>
+                        <TextBlock Text="Live Agents" Style="{StaticResource SectionTitle}"/>
+                        <TextBlock x:Name="LiveMetric" Grid.Row="1" Text="--" Style="{StaticResource MetricValue}" Foreground="{StaticResource CyberSuccess}" FontSize="40" VerticalAlignment="Center"/>
+                        <TextBlock Grid.Row="2" Text="recent check-ins" Foreground="{StaticResource CyberDim}" FontSize="12"/>
+                        <Ellipse Width="34" Height="34" Fill="#064E3B" Stroke="{StaticResource CyberSuccess}" HorizontalAlignment="Right" VerticalAlignment="Top"/>
                     </Grid>
+                </Border>
 
-                    <StackPanel Grid.Column="4" VerticalAlignment="Center">
-                        <TextBlock Text="Local Integration / API" Style="{StaticResource SectionTitle}"/>
-                        <TextBlock x:Name="ApiMetric"
-                                   Text="--"
-                                   FontSize="22"
-                                   FontWeight="Bold"
-                                   Foreground="{StaticResource TextMain}"
-                                   Margin="0,6,0,0"/>
-                    </StackPanel>
-                </Grid>
-            </Border>
-            <!-- AGENTS TABLE -->
-            <Border Grid.Row="2"
-                    Style="{StaticResource CardBorder}"
-                    Padding="16"
-                    Margin="0,14,0,0">
-                <Grid>
+                <Border Grid.Column="2" Style="{StaticResource CyberMetricCard}" Margin="0,0,10,0">
+                    <Grid>
+                        <Grid.RowDefinitions>
+                            <RowDefinition Height="Auto"/>
+                            <RowDefinition Height="*"/>
+                            <RowDefinition Height="Auto"/>
+                        </Grid.RowDefinitions>
+                        <TextBlock Text="CPU %" Style="{StaticResource SectionTitle}"/>
+                        <TextBlock x:Name="CpuMetric" Grid.Row="1" Text="--" Style="{StaticResource MetricValue}" FontSize="36" VerticalAlignment="Center"/>
+                        <TextBlock Grid.Row="2" Text="peak live sample" Foreground="{StaticResource CyberDim}" FontSize="12"/>
+                        <Rectangle Width="36" Height="8" RadiusX="4" RadiusY="4" Fill="{StaticResource CyberAccent}" HorizontalAlignment="Right" VerticalAlignment="Top"/>
+                    </Grid>
+                </Border>
+
+                <Border Grid.Column="3" Style="{StaticResource CyberMetricCard}" Margin="0,0,10,0">
+                    <Grid>
+                        <Grid.RowDefinitions>
+                            <RowDefinition Height="Auto"/>
+                            <RowDefinition Height="*"/>
+                            <RowDefinition Height="Auto"/>
+                        </Grid.RowDefinitions>
+                        <TextBlock Text="Memory %" Style="{StaticResource SectionTitle}"/>
+                        <TextBlock x:Name="MemoryMetric" Grid.Row="1" Text="--" Style="{StaticResource MetricValue}" FontSize="36" VerticalAlignment="Center"/>
+                        <TextBlock Grid.Row="2" Text="peak live sample" Foreground="{StaticResource CyberDim}" FontSize="12"/>
+                        <Rectangle Width="36" Height="8" RadiusX="4" RadiusY="4" Fill="{StaticResource CyberSuccess}" HorizontalAlignment="Right" VerticalAlignment="Top"/>
+                    </Grid>
+                </Border>
+
+                <Border Grid.Column="4" Style="{StaticResource CyberMetricCard}">
+                    <Grid>
+                        <Grid.RowDefinitions>
+                            <RowDefinition Height="Auto"/>
+                            <RowDefinition Height="*"/>
+                            <RowDefinition Height="Auto"/>
+                        </Grid.RowDefinitions>
+                        <TextBlock Text="API / Tunnel Status" Style="{StaticResource SectionTitle}"/>
+                        <TextBlock Grid.Row="1" Text="MONITORED" Style="{StaticResource MetricValue}" FontSize="28" VerticalAlignment="Center"/>
+                        <TextBlock Grid.Row="2" Text="127.0.0.1:18001" Foreground="{StaticResource CyberDim}" FontSize="12"/>
+                        <Ellipse Width="12" Height="12" Fill="{StaticResource CyberAccent}" HorizontalAlignment="Right" VerticalAlignment="Top"/>
+                    </Grid>
+                </Border>
+            </Grid>
+
+            <Grid Grid.Row="2" Margin="0,14,0,0">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="1.55*"/>
+                    <ColumnDefinition Width="1*"/>
+                </Grid.ColumnDefinitions>
+
+                <Border Grid.Column="0" Style="{StaticResource CyberCard}" Margin="0,0,14,0">
+                    <Grid>
+                        <Grid.RowDefinitions>
+                            <RowDefinition Height="Auto"/>
+                            <RowDefinition Height="Auto"/>
+                            <RowDefinition Height="*"/>
+                        </Grid.RowDefinitions>
+                        <DockPanel>
+                            <TextBlock Text="Agent Mesh" FontSize="18" FontWeight="Bold" DockPanel.Dock="Left"/>
+                            <TextBlock Text="live endpoint inventory" Foreground="{StaticResource CyberDim}" FontSize="12" HorizontalAlignment="Right"/>
+                        </DockPanel>
+                        <Grid Grid.Row="1" Margin="0,12,0,10">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*"/>
+                                <ColumnDefinition Width="150"/>
+                            </Grid.ColumnDefinitions>
+                            <TextBox x:Name="SearchBox" Style="{StaticResource CyberInput}" Height="34" TextChanged="SearchBox_TextChanged"/>
+                            <Border Grid.Column="1" Background="#071426" BorderBrush="{StaticResource CyberBorder}" BorderThickness="1" CornerRadius="10" Padding="10,0" Margin="10,0,0,0">
+                                <TextBlock Text="Filter agents" Foreground="{StaticResource CyberDim}" VerticalAlignment="Center" FontSize="12"/>
+                            </Border>
+                        </Grid>
+                        <DataGrid x:Name="AgentsGrid" Grid.Row="2" ItemsSource="{Binding Agents}" SelectionChanged="AgentsGrid_SelectionChanged" AlternationCount="2" ScrollViewer.CanContentScroll="True" ScrollViewer.VerticalScrollBarVisibility="Auto" ScrollViewer.HorizontalScrollBarVisibility="Auto">
+                            <DataGrid.Columns>
+                                <DataGridTextColumn Header="Hostname" Binding="{Binding Hostname}" Width="160"/>
+                                <DataGridTextColumn Header="Status" Binding="{Binding Status}" Width="90"/>
+                                <DataGridTextColumn Header="Version" Binding="{Binding Version}" Width="110"/>
+                                <DataGridTextColumn Header="OS" Binding="{Binding OS}" Width="260"/>
+                                <DataGridTextColumn Header="CPU %" Binding="{Binding CpuPercent}" Width="80"/>
+                                <DataGridTextColumn Header="Memory" Binding="{Binding MemorySummary}" Width="170"/>
+                                <DataGridTextColumn Header="Processes" Binding="{Binding ProcessCount}" Width="90"/>
+                                <DataGridTextColumn Header="Uptime" Binding="{Binding Uptime}" Width="100"/>
+                                <DataGridTextColumn Header="Network" Binding="{Binding NetworkSummary}" Width="300"/>
+                                <DataGridTextColumn Header="Last Check-In" Binding="{Binding LastCheckIn}" Width="160"/>
+                            </DataGrid.Columns>
+                        </DataGrid>
+                    </Grid>
+                </Border>
+
+                <Grid Grid.Column="1">
                     <Grid.RowDefinitions>
-                        <RowDefinition Height="34"/>
-                        <RowDefinition Height="*"/>
+                        <RowDefinition Height="1*"/>
+                        <RowDefinition Height="1*"/>
+                        <RowDefinition Height="0.72*"/>
                     </Grid.RowDefinitions>
-
-                    <DockPanel Grid.Row="0">
-                        <TextBlock Text="Agents"
-                                   FontSize="18"
-                                   FontWeight="Bold"
-                                   Foreground="{StaticResource TextMain}"
-                                   VerticalAlignment="Center"/>
-                    </DockPanel>
-
-                    <DataGrid x:Name="AgentsGrid"
-                              Grid.Row="1"
-                              Margin="0,8,0,0"
-                              ItemsSource="{Binding Agents}"
-                              SelectionChanged="AgentsGrid_SelectionChanged"
-                              AlternationCount="2"
-                              ScrollViewer.CanContentScroll="True"
-                              ScrollViewer.VerticalScrollBarVisibility="Auto"
-                              ScrollViewer.HorizontalScrollBarVisibility="Auto">
-                        <DataGrid.Columns>
-                            <DataGridTextColumn Header="Hostname" Binding="{Binding Hostname}" Width="160"/>
-                            <DataGridTextColumn Header="Status" Binding="{Binding Status}" Width="90"/>
-                            <DataGridTextColumn Header="Version" Binding="{Binding Version}" Width="110"/>
-                            <DataGridTextColumn Header="OS" Binding="{Binding OS}" Width="260"/>
-                            <DataGridTextColumn Header="CPU %" Binding="{Binding CpuPercent}" Width="80"/>
-                            <DataGridTextColumn Header="Memory" Binding="{Binding MemorySummary}" Width="170"/>
-                            <DataGridTextColumn Header="Processes" Binding="{Binding ProcessCount}" Width="90"/>
-                            <DataGridTextColumn Header="Uptime" Binding="{Binding Uptime}" Width="100"/>
-                            <DataGridTextColumn Header="Network" Binding="{Binding NetworkSummary}" Width="300"/>
-                            <DataGridTextColumn Header="Last Check-In" Binding="{Binding LastCheckIn}" Width="160"/>
-                        </DataGrid.Columns>
-                    </DataGrid>
+                    <Border Grid.Row="0" Style="{StaticResource CyberCard}" Margin="0,0,0,12">
+                        <Grid>
+                            <Grid.RowDefinitions>
+                                <RowDefinition Height="Auto"/>
+                                <RowDefinition Height="*"/>
+                            </Grid.RowDefinitions>
+                            <DockPanel Margin="0,0,0,10">
+                                <TextBlock Text="CPU Live Chart" Style="{StaticResource SectionTitle}" DockPanel.Dock="Left"/>
+                                <TextBlock Text="60 samples" Foreground="{StaticResource CyberDim}" FontSize="12" HorizontalAlignment="Right"/>
+                            </DockPanel>
+                            <Border Grid.Row="1" Background="#050B14" BorderBrush="#1E5B82" BorderThickness="1" CornerRadius="12" Padding="8">
+                                <Canvas x:Name="CpuGraphCanvas" ClipToBounds="True" Background="Transparent">
+                                    <Line X1="0" Y1="24" X2="1000" Y2="24" Stroke="#12304D" StrokeThickness="1"/>
+                                    <Line X1="0" Y1="58" X2="1000" Y2="58" Stroke="#12304D" StrokeThickness="1"/>
+                                    <Line X1="0" Y1="92" X2="1000" Y2="92" Stroke="#12304D" StrokeThickness="1"/>
+                                    <Polyline x:Name="CpuGraph" Stroke="{StaticResource CyberAccent}" StrokeThickness="2.8" StrokeLineJoin="Round" StrokeStartLineCap="Round" StrokeEndLineCap="Round"/>
+                                </Canvas>
+                            </Border>
+                        </Grid>
+                    </Border>
+                    <Border Grid.Row="1" Style="{StaticResource CyberCard}" Margin="0,0,0,12">
+                        <Grid>
+                            <Grid.RowDefinitions>
+                                <RowDefinition Height="Auto"/>
+                                <RowDefinition Height="*"/>
+                            </Grid.RowDefinitions>
+                            <DockPanel Margin="0,0,0,10">
+                                <TextBlock Text="Memory Live Chart" Style="{StaticResource SectionTitle}" DockPanel.Dock="Left"/>
+                                <TextBlock Text="60 samples" Foreground="{StaticResource CyberDim}" FontSize="12" HorizontalAlignment="Right"/>
+                            </DockPanel>
+                            <Border Grid.Row="1" Background="#050B14" BorderBrush="#1E5B82" BorderThickness="1" CornerRadius="12" Padding="8">
+                                <Canvas x:Name="MemoryGraphCanvas" ClipToBounds="True" Background="Transparent">
+                                    <Line X1="0" Y1="24" X2="1000" Y2="24" Stroke="#12304D" StrokeThickness="1"/>
+                                    <Line X1="0" Y1="58" X2="1000" Y2="58" Stroke="#12304D" StrokeThickness="1"/>
+                                    <Line X1="0" Y1="92" X2="1000" Y2="92" Stroke="#12304D" StrokeThickness="1"/>
+                                    <Polyline x:Name="MemoryGraph" Stroke="{StaticResource CyberSuccess}" StrokeThickness="2.8" StrokeLineJoin="Round" StrokeStartLineCap="Round" StrokeEndLineCap="Round"/>
+                                </Canvas>
+                            </Border>
+                        </Grid>
+                    </Border>
+                    <Border Grid.Row="2" Style="{StaticResource CyberCard}">
+                        <Grid>
+                            <Grid.RowDefinitions>
+                                <RowDefinition Height="Auto"/>
+                                <RowDefinition Height="*"/>
+                            </Grid.RowDefinitions>
+                            <TextBlock Text="Telemetry Focus" Style="{StaticResource SectionTitle}"/>
+                            <Grid Grid.Row="1" Margin="0,10,0,0">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*"/>
+                                    <ColumnDefinition Width="*"/>
+                                </Grid.ColumnDefinitions>
+                                <Border Background="#071426" BorderBrush="{StaticResource CyberBorder}" BorderThickness="1" CornerRadius="12" Padding="12" Margin="0,0,6,0">
+                                    <StackPanel>
+                                        <TextBlock Text="Network" Foreground="{StaticResource CyberDim}" FontSize="12"/>
+                                        <TextBlock Text="adapter focus" Foreground="{StaticResource CyberText}" FontWeight="Bold" Margin="0,8,0,0"/>
+                                    </StackPanel>
+                                </Border>
+                                <Border Grid.Column="1" Background="#071426" BorderBrush="{StaticResource CyberBorder}" BorderThickness="1" CornerRadius="12" Padding="12" Margin="6,0,0,0">
+                                    <StackPanel>
+                                        <TextBlock Text="Disk" Foreground="{StaticResource CyberDim}" FontSize="12"/>
+                                        <TextBlock Text="capacity watch" Foreground="{StaticResource CyberText}" FontWeight="Bold" Margin="0,8,0,0"/>
+                                    </StackPanel>
+                                </Border>
+                            </Grid>
+                        </Grid>
+                    </Border>
                 </Grid>
-            </Border>
+            </Grid>
 
-            <!-- BOTTOM DETAILS -->
-            <Border Grid.Row="3"
-                    Style="{StaticResource CardBorder}"
-                    Padding="16"
-                    Margin="0,14,0,0">
-                <TabControl>
-                    <TabItem Header="Top Tasks">
-                        <DataGrid x:Name="TasksGrid"
-                                  ItemsSource="{Binding SelectedTasks}"
-                                  Margin="0,10,0,0"
-                                  AlternationCount="2"
-                                  ScrollViewer.VerticalScrollBarVisibility="Auto"
-                                  ScrollViewer.HorizontalScrollBarVisibility="Auto">
+            <Border Grid.Row="3" Style="{StaticResource CyberCard}" Margin="0,14,0,0">
+                <TabControl Style="{StaticResource CyberTabControl}" HorizontalAlignment="Stretch" VerticalAlignment="Stretch">
+                    <TabItem Header="Top Tasks" Style="{StaticResource CyberTabItem}">
+                        <DataGrid x:Name="TasksGrid" ItemsSource="{Binding SelectedTasks}" Margin="0,12,0,0" AlternationCount="2" ScrollViewer.VerticalScrollBarVisibility="Auto" ScrollViewer.HorizontalScrollBarVisibility="Auto">
                             <DataGrid.Columns>
                                 <DataGridTextColumn Header="PID" Binding="{Binding Pid}" Width="100"/>
                                 <DataGridTextColumn Header="Process" Binding="{Binding Name}" Width="320"/>
@@ -311,14 +581,8 @@
                             </DataGrid.Columns>
                         </DataGrid>
                     </TabItem>
-
-                    <TabItem Header="Network">
-                        <DataGrid x:Name="NetworkGrid"
-                                  ItemsSource="{Binding SelectedAdapters}"
-                                  Margin="0,10,0,0"
-                                  AlternationCount="2"
-                                  ScrollViewer.VerticalScrollBarVisibility="Auto"
-                                  ScrollViewer.HorizontalScrollBarVisibility="Auto">
+                    <TabItem Header="Network" Style="{StaticResource CyberTabItem}">
+                        <DataGrid x:Name="NetworkGrid" ItemsSource="{Binding SelectedAdapters}" Margin="0,12,0,0" AlternationCount="2" ScrollViewer.VerticalScrollBarVisibility="Auto" ScrollViewer.HorizontalScrollBarVisibility="Auto">
                             <DataGrid.Columns>
                                 <DataGridTextColumn Header="Adapter" Binding="{Binding Name}" Width="220"/>
                                 <DataGridTextColumn Header="Status" Binding="{Binding Status}" Width="90"/>
@@ -327,14 +591,8 @@
                             </DataGrid.Columns>
                         </DataGrid>
                     </TabItem>
-
-                    <TabItem Header="Disks">
-                        <DataGrid x:Name="DisksGrid"
-                                  ItemsSource="{Binding SelectedDisks}"
-                                  Margin="0,10,0,0"
-                                  AlternationCount="2"
-                                  ScrollViewer.VerticalScrollBarVisibility="Auto"
-                                  ScrollViewer.HorizontalScrollBarVisibility="Auto">
+                    <TabItem Header="Disks" Style="{StaticResource CyberTabItem}">
+                        <DataGrid x:Name="DisksGrid" ItemsSource="{Binding SelectedDisks}" Margin="0,12,0,0" AlternationCount="2" ScrollViewer.VerticalScrollBarVisibility="Auto" ScrollViewer.HorizontalScrollBarVisibility="Auto">
                             <DataGrid.Columns>
                                 <DataGridTextColumn Header="Mount" Binding="{Binding Mount}" Width="160"/>
                                 <DataGridTextColumn Header="Free GB" Binding="{Binding FreeGb}" Width="120"/>
@@ -342,63 +600,37 @@
                             </DataGrid.Columns>
                         </DataGrid>
                     </TabItem>
-
-                    <TabItem Header="Raw JSON">
-                        <TextBox x:Name="RawJsonBox"
-                                 Margin="0,10,0,0"
-                                 TextWrapping="NoWrap"
-                                 AcceptsReturn="True"
-                                 AcceptsTab="True"
-                                 FontFamily="Consolas"
-                                 FontSize="12"
-                                 VerticalScrollBarVisibility="Auto"
-                                 HorizontalScrollBarVisibility="Auto"
-                                 IsReadOnly="True"/>
+                    <TabItem Header="Raw JSON" Style="{StaticResource CyberTabItem}">
+                        <TextBox x:Name="RawJsonBox" Style="{StaticResource CyberEditor}" Margin="0,12,0,0" TextWrapping="NoWrap" AcceptsReturn="True" AcceptsTab="True" FontFamily="Consolas" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Auto" IsReadOnly="True"/>
                     </TabItem>
                 </TabControl>
             </Border>
         </Grid>
 
-        <!-- RIGHT PANEL -->
-        <Border Grid.Column="2"
-                Margin="0,20,20,20"
-                Style="{StaticResource CardBorder}"
-                Padding="18">
+        <Border Grid.Column="2" Margin="0,18,18,18" Style="{StaticResource CyberCard}">
             <ScrollViewer VerticalScrollBarVisibility="Auto">
                 <StackPanel>
-                    <TextBlock Text="Selected Agent"
-                               FontSize="22"
-                               FontWeight="Bold"
-                               Foreground="{StaticResource TextMain}"/>
-
-                    <TextBlock x:Name="SelectedSubtitle"
-                               Text="No agent selected"
-                               Foreground="{StaticResource TextSoft}"
-                               FontSize="12"
-                               Margin="0,6,0,22"/>
-
-                    <Border Style="{StaticResource CardBorder}" Background="{StaticResource PanelAlt}" Padding="14" Margin="0,0,0,12">
+                    <TextBlock Text="Selected Agent" FontSize="22" FontWeight="Bold"/>
+                    <TextBlock x:Name="SelectedSubtitle" Text="No agent selected" Foreground="{StaticResource CyberDim}" FontSize="12" Margin="0,6,0,18"/>
+                    <Border Style="{StaticResource CyberCard}" Background="{StaticResource CyberCardAlt}" Padding="14" Margin="0,0,0,12">
                         <StackPanel>
                             <TextBlock Text="Identity" Style="{StaticResource SectionTitle}"/>
                             <TextBlock x:Name="IdentityText" Margin="0,10,0,0" TextWrapping="Wrap" LineHeight="20"/>
                         </StackPanel>
                     </Border>
-
-                    <Border Style="{StaticResource CardBorder}" Background="{StaticResource PanelAlt}" Padding="14" Margin="0,0,0,12">
+                    <Border Style="{StaticResource CyberCard}" Background="{StaticResource CyberCardAlt}" Padding="14" Margin="0,0,0,12">
                         <StackPanel>
                             <TextBlock Text="System" Style="{StaticResource SectionTitle}"/>
                             <TextBlock x:Name="SystemText" Margin="0,10,0,0" TextWrapping="Wrap" LineHeight="20"/>
                         </StackPanel>
                     </Border>
-
-                    <Border Style="{StaticResource CardBorder}" Background="{StaticResource PanelAlt}" Padding="14" Margin="0,0,0,12">
+                    <Border Style="{StaticResource CyberCard}" Background="{StaticResource CyberCardAlt}" Padding="14" Margin="0,0,0,12">
                         <StackPanel>
                             <TextBlock Text="Network Focus" Style="{StaticResource SectionTitle}"/>
                             <TextBlock x:Name="NetworkFocusText" Margin="0,10,0,0" TextWrapping="Wrap" LineHeight="20"/>
                         </StackPanel>
                     </Border>
-
-                    <Border Style="{StaticResource CardBorder}" Background="{StaticResource PanelAlt}" Padding="14">
+                    <Border Style="{StaticResource CyberCard}" Background="{StaticResource CyberCardAlt}" Padding="14">
                         <StackPanel>
                             <TextBlock Text="Disks" Style="{StaticResource SectionTitle}"/>
                             <TextBlock x:Name="DiskText" Margin="0,10,0,0" TextWrapping="Wrap" LineHeight="20"/>
@@ -409,6 +641,3 @@
         </Border>
     </Grid>
 </Window>
-
-
-
