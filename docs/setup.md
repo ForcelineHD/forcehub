@@ -58,9 +58,3 @@ The agent should not run privileged commands unless the command is documented, a
 ## Runtime Files
 
 Runtime output belongs outside Git. The repository ignore rules exclude local data, logs, databases, runtime directories, virtual environments, build output, and dependency folders.
-
-## Native Monitor V2 Helpers
-
-Native Monitor V2 publishes its PowerShell helper scripts beside `ForceHubNativeMonitorV2.exe`. The scripts use safe defaults that can be overridden with environment variables such as `FORCEHUB_SSH_HOST`, `FORCEHUB_REMOTE_REPO`, `FORCEHUB_AGENT_ROOT`, and port settings.
-
-The Windows runtime agent token file is generated locally at runtime and must not be committed.
