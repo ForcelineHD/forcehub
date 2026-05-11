@@ -42,3 +42,4 @@ Thumbs.db
 server.out
 server.err
 *.log
+*.pid

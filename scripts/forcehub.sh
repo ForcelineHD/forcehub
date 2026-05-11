@@ -4,8 +4,8 @@ set -euo pipefail
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="${FORCEHUB_PROJECT_DIR:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 VENV="${FORCEHUB_VENV:-$PROJECT_DIR/.venv}"
-HOST="${FORCEHUB_BIND_HOST:-127.0.0.1}"
-PORT="${FORCEHUB_BIND_PORT:-8001}"
+HOST="127.0.0.1"
+PORT="8001"
 LOG_DIR="${FORCEHUB_LOG_DIR:-$PROJECT_DIR/logs}"
 PID_FILE="$LOG_DIR/forcehub.pid"
 LOG_FILE="$LOG_DIR/forcehub.log"
@@ -20,16 +20,6 @@ fi
 source "$VENV/bin/activate"
 mkdir -p "$LOG_DIR"
 
-TOKEN_FILE="${FORCEHUB_AGENT_TOKEN_FILE:-$PROJECT_DIR/runtime/agent_token.txt}"
-mkdir -p "$(dirname "$TOKEN_FILE")"
-
-if [ ! -f "$TOKEN_FILE" ]; then
-  openssl rand -hex 32 > "$TOKEN_FILE"
-  chmod 600 "$TOKEN_FILE"
-fi
-
-export FORCEHUB_AGENT_TOKEN="$(cat "$TOKEN_FILE")"
-
 # FORCEHUB_AUTH_DEFAULTS
 # Load local environment if present, then preserve caller-provided values.
 # Authentication is enabled by default; set FORCEHUB_AUTH_DISABLED=1 only for an intentionally unauthenticated local instance.
@@ -41,6 +31,34 @@ if [ -f "$PROJECT_DIR/.env" ]; then
 fi
 
 export FORCEHUB_AUTH_DISABLED="${FORCEHUB_AUTH_DISABLED:-0}"
+
+TOKEN_FILE="${FORCEHUB_AGENT_TOKEN_FILE:-$PROJECT_DIR/data/agent_token.txt}"
+
+load_agent_token() {
+  local token_source
+
+  if [ -n "${FORCEHUB_AGENT_TOKEN:-}" ]; then
+    FORCEHUB_AGENT_TOKEN="$(printf '%s' "$FORCEHUB_AGENT_TOKEN" | tr -d '\r\n')"
+    token_source="env"
+  else
+    mkdir -p "$(dirname "$TOKEN_FILE")"
+    chmod 700 "$(dirname "$TOKEN_FILE")"
+
+    if [ ! -f "$TOKEN_FILE" ]; then
+      umask 077
+      openssl rand -hex 32 > "$TOKEN_FILE"
+      chmod 600 "$TOKEN_FILE"
+    fi
+
+    FORCEHUB_AGENT_TOKEN="$(tr -d '\r\n' < "$TOKEN_FILE")"
+    token_source="data/agent_token.txt"
+  fi
+
+  export FORCEHUB_AGENT_TOKEN
+  echo "agent token loaded"
+  echo "agent token source: $token_source"
+  echo "agent token length: ${#FORCEHUB_AGENT_TOKEN}"
+}
 
 validate_auth_config() {
   if [ "$FORCEHUB_AUTH_DISABLED" = "1" ]; then
@@ -68,19 +86,21 @@ validate_auth_config() {
 
 
 
-http_code() {
-  curl -s -o /dev/null -w "%{http_code}" "http://$HOST:$PORT/" || true
+agent_api_code() {
+  curl -s -o /dev/null -w "%{http_code}" \
+    -H "X-ForceHub-Agent-Token: ${FORCEHUB_AGENT_TOKEN:-}" \
+    "http://$HOST:$PORT/api/agents" || true
 }
 
-http_alive() {
-  CODE="$(http_code)"
+agent_api_alive() {
+  CODE="$(agent_api_code)"
   case "$CODE" in
-    200|301|302|401|403)
-      echo "HTTP reachable: $CODE"
+    200)
+      echo "Agent API reachable: $CODE"
       return 0
       ;;
     *)
-      echo "HTTP not ready: $CODE"
+      echo "Agent API check failed: $CODE"
       return 1
       ;;
   esac
@@ -89,22 +109,24 @@ http_alive() {
 start() {
   if [ -f "$PID_FILE" ] && kill -0 "$(cat "$PID_FILE")" 2>/dev/null; then
     echo "ForceHub already running. PID: $(cat "$PID_FILE")"
-    http_alive || true
+    load_agent_token
+    agent_api_alive || true
     exit 0
   fi
 
   validate_auth_config
+  load_agent_token
 
   echo "Starting ForceHub on http://$HOST:$PORT ..."
-  nohup python -m uvicorn app.main:app --host "$HOST" --port "$PORT" --reload > "$LOG_FILE" 2>&1 &
+  nohup "$VENV/bin/python" -m uvicorn app.main:app --host 127.0.0.1 --port 8001 --reload > "$LOG_FILE" 2>&1 &
   echo $! > "$PID_FILE"
 
   sleep 2
 
   if kill -0 "$(cat "$PID_FILE")" 2>/dev/null; then
     echo "ForceHub started. PID: $(cat "$PID_FILE")"
-    http_alive || {
-      echo "Process is running, but HTTP check failed. Last logs:"
+    agent_api_alive || {
+      echo "Process is running, but Agent API check failed. Last logs:"
       tail -80 "$LOG_FILE"
       exit 1
     }
@@ -144,7 +166,8 @@ status() {
   echo
 
   echo "== HTTP =="
-  http_alive || true
+  load_agent_token
+  agent_api_alive || true
 }
 
 restart() {

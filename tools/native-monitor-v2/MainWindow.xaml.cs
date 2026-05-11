@@ -24,8 +24,6 @@ public partial class MainWindow : Window
         Environment.GetEnvironmentVariable("FORCEHUB_AGENT_HOME") ?? AppContext.BaseDirectory;
     private static readonly string ApiUrl =
         Environment.GetEnvironmentVariable("FORCEHUB_AGENTS_URL") ?? "http://127.0.0.1:18001/api/agents";
-    private static readonly string TokenFile =
-        Environment.GetEnvironmentVariable("FORCEHUB_AGENT_TOKEN_FILE") ?? Path.Combine(BaseDir, "runtime", "agent_token.txt");
     private static readonly string[] DefaultFocusAdapterKeywords = new[] { "Ethernet", "Wi-Fi", "Loopback" };
 
     private readonly HttpClient _http = new() { Timeout = TimeSpan.FromSeconds(2) };
@@ -106,7 +104,7 @@ public partial class MainWindow : Window
 
         try
         {
-            string token = ReadToken();
+            string token = ReadTokenFromTextBox();
 
             using var req = new HttpRequestMessage(HttpMethod.Get, ApiUrl);
             req.Headers.Add("X-ForceHub-Agent-Token", token);
@@ -354,11 +352,10 @@ public partial class MainWindow : Window
         return focus.Count == 0 ? "No focus adapters found." : string.Join("\n", focus);
     }
 
-    private static string ReadToken()
+    private string ReadTokenFromTextBox()
     {
-        if (!File.Exists(TokenFile)) throw new Exception("Missing token file: " + TokenFile);
-        string token = File.ReadAllText(TokenFile).Trim();
-        if (token.Length == 0) throw new Exception("Token file is empty.");
+        string token = AgentTokenBox.Password.Trim();
+        if (token.Length == 0) throw new Exception("Agent token is required.");
         return token;
     }
 
