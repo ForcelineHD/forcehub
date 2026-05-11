@@ -19,5 +19,14 @@
     <Page Remove="ForceHubNativeMonitorV2_BACKUPS\**" />
     <None Remove="ForceHubNativeMonitorV2_BACKUPS\**" />
   </ItemGroup>
+
+  <ItemGroup>
+    <Content Include="scripts\*.ps1">
+      <Link>%(Filename)%(Extension)</Link>
+      <TargetPath>%(Filename)%(Extension)</TargetPath>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+    </Content>
+  </ItemGroup>
 </Project>
 
